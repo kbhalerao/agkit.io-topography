@@ -30,6 +30,33 @@ RASTER_OUTPUTS = (
 )
 
 
+def _resolve_gisbase() -> str:
+    """
+    Resolve the GRASS install root.
+
+    Order of precedence:
+      1. ``GISBASE`` env var (explicit; set by the Dockerfile to
+         ``/usr/local/grass`` for the Alpine image).
+      2. ``grass --config path`` output (covers Ubuntu apt grass at
+         ``/usr/lib/grass8x``).
+      3. ``/usr/local/grass`` as a last-resort fallback.
+    """
+    env_gisbase = os.environ.get("GISBASE")
+    if env_gisbase and os.path.isdir(env_gisbase):
+        return env_gisbase
+    try:
+        result = subprocess.run(
+            ["grass", "--config", "path"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        path = result.stdout.strip()
+        if path and os.path.isdir(path):
+            return path
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+    return "/usr/local/grass"
+
+
 def initialize_grassdb():
     """
     Create a fresh GRASS location + PERMANENT mapset under `/tmp/grassdata`,
@@ -37,7 +64,7 @@ def initialize_grassdb():
     caller can tear it down on exit.
     """
     myepsg = "4326"
-    gisbase = "/usr/local/grass"
+    gisbase = _resolve_gisbase()
 
     os.environ["GISBASE"] = gisbase
     gpydir = os.path.join(gisbase, "etc", "python")
