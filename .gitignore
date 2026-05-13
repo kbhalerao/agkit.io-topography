@@ -1,0 +1,28 @@
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+/dist/
+/build/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Large fixtures (downloaded on demand)
+/tests/*.tif
+/tests/elev_location/
+/tests/Garys/
+
+# Lambda local-run outputs
+/tmp/

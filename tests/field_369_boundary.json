@@ -1,0 +1,542 @@
+[
+  {
+    "metadata": {
+      "function_name": "elev_public_10m",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "elevation_public_10m",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "elevation_public_10m.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/elevation_public_10m.tif/elevation_public_10m/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "elevation_public_10m.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/elevation_public_10m.png/elevation_public_10m/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "function_name": "slope_public_10m",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "slope_public_10m",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "slope_public_10m.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/slope_public_10m.tif/slope_public_10m/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "slope_public_10m.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/slope_public_10m.png/slope_public_10m/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "function_name": "watershed_drainage",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "watershed_drainage",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "watershed_drainage.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_drainage.tif/watershed_drainage/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "watershed_drainage.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_drainage.png/watershed_drainage/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "function_name": "watershed_streambeds",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "watershed_streambeds",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "watershed_streambeds.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_streambeds.tif/watershed_streambeds/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "erodability.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_streambeds.png/watershed_streambeds/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "function_name": "watershed_spi",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "watershed_spi",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "watershed_spi.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_spi.tif/watershed_spi/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "watershed_spi.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_spi.png/watershed_spi/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "function_name": "watershed_tci",
+      "field_boundary": {
+        "type": "FeatureCollection",
+        "features": [
+          {
+            "type": "Feature",
+            "geometry": {
+              "type": "MultiPolygon",
+              "coordinates": [
+                [
+                  [
+                    [
+                      -91.606815,
+                      41.366873
+                    ],
+                    [
+                      -91.606686,
+                      41.36734
+                    ],
+                    [
+                      -91.607085,
+                      41.368007
+                    ],
+                    [
+                      -91.609102,
+                      41.368145
+                    ],
+                    [
+                      -91.609046,
+                      41.373666
+                    ],
+                    [
+                      -91.6083,
+                      41.373511
+                    ],
+                    [
+                      -91.608141,
+                      41.373778
+                    ],
+                    [
+                      -91.609016,
+                      41.374719
+                    ],
+                    [
+                      -91.608982,
+                      41.375817
+                    ],
+                    [
+                      -91.604206,
+                      41.375975
+                    ],
+                    [
+                      -91.604326,
+                      41.366819
+                    ],
+                    [
+                      -91.606815,
+                      41.366873
+                    ]
+                  ]
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "input_data": null,
+      "field_id": 369,
+      "soildx_prefix": "labcore"
+    },
+    "post": {
+      "domain": "https://demo.soildiagnostics.com",
+      "parameter": "watershed_tci",
+      "layer": "USGS 10m Elevation",
+      "output": [
+        {
+          "filename": "watershed_tci.tif",
+          "extension": "tif",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_tci.tif/watershed_tci/USGS%2010m%20Elevation/raster/post/"
+        },
+        {
+          "filename": "watershed_tci.png",
+          "extension": "png",
+          "post_url": "https://demo.soildiagnostics.com/clients/field/369/gis/watershed_tci.png/watershed_tci/USGS%2010m%20Elevation/raster/post/"
+        }
+      ]
+    }
+  }
+]
