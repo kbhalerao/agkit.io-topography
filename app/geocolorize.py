@@ -4,6 +4,8 @@ PNG colorization wrapper around `gdaldem color-relief`.
 Ported from USGS2021. The colorize step writes a `color.txt` temp file
 into the working folder, then runs gdaldem via the Python API.
 """
+from __future__ import annotations
+
 import os
 
 from osgeo import gdal
