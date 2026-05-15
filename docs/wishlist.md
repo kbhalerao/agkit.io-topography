@@ -3,6 +3,18 @@
 Captured 2026-05-13 from an ideation pass after the initial scaffold landed.
 Not committed to scope or priority; this is a backlog to draw from.
 
+## Companion specs (graduated from wishlist)
+
+These have moved out of "ideation" and into their own feature docs. Items
+here are no longer candidates for re-discussion — go to the spec.
+
+- **`contour-feature.md`** — 2 ft / 10 ft index contours over the field +
+  50 ft buffer. Feeds the erosion app's slope-shooting basemap.
+- **`flowlines-feature.md`** — MFD-extracted flow paths with per-line
+  catchment polygons and Douglas-Peucker'd slope profiles. Feeds the
+  erosion app's auto-suggest layer (planner-drawn is the override path).
+  Has hard prerequisites in this wishlist — see notes on A2 and A4.
+
 ## Framing
 
 Two things temper the urgency of several "correctness" items below:
@@ -37,6 +49,11 @@ the `m` flag toggle may have moved). MFD concentrates less flow into thin
 lines and gives smoother, more realistic accumulation on hillslopes — the
 right default for 10 m DEMs on single ag fields.
 
+**Now a blocker for `flowlines-feature.md`** — the MFD flow-line extractor
+calls `r.watershed -m` explicitly. Either land A2 first, or have the
+flow-lines handler set the `-m` flag locally and accept the temporary
+divergence from the canonical pipeline. The former is cheaper.
+
 ### A3. (Optional) HUC12 enclosing-watershed mode
 **Default stays field + buffer.** When the event opts in via
 `metadata.huc_mode=true`:
@@ -63,6 +80,12 @@ Breach over fill is preferred for ag landscapes (culverts, road crossings,
 ditches). Tooling options:
 * GRASS `r.hydrodem`.
 * WhiteboxTools `BreachDepressions` (recommended; adds a binary dep).
+
+**Quality multiplier for `flowlines-feature.md`.** The flow-lines spec
+uses `r.fill.dir` as a stopgap; breach produces visibly better paths in
+ag terrain (no dead-ends at road culverts). Not a blocker — flow lines
+ship correctly without it — but the planner-facing output gets
+noticeably better the day A4 lands.
 
 ### A5. Slope-length cap
 RUSLE's empirical basis breaks past ~100–120 m of slope length. Flow-
@@ -193,7 +216,8 @@ without docker.
 ## Suggested sequencing
 
 1. **Sprint 1 — correctness:** A1 + A2 + A4 + A5. Smallest scope that
-   produces a RUSLE-ready raster LS.
+   produces a RUSLE-ready raster LS. A2 also unblocks
+   `flowlines-feature.md`; A4 then upgrades flow-line quality.
 2. **Sprint 2 — ops baseline:** C1 + C2 + C4. DLQ-on-failure + idempotency
    + structured logs. Prerequisites for trusting Sprint 1 in production.
 3. **Sprint 3 — extent (optional):** A3 + A7. HUC12 mode behind a flag.

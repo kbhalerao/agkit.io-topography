@@ -33,6 +33,10 @@ class GeoWorkerNamedFunctionsTests(unittest.TestCase):
         # NEW — L / LS scalars
         "watershed_length_slope",
         "watershed_slope_steepness",
+        # NEW — contour vector lines
+        "contour_lines",
+        # NEW — MFD flow lines (RUSLE2 slope shooting)
+        "mfd_flowlines",
     )
 
     def test_all_named_functions_callable(self):
