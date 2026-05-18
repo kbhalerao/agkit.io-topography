@@ -10,10 +10,16 @@ here are no longer candidates for re-discussion — go to the spec.
 
 - **`contour-feature.md`** — 2 ft / 10 ft index contours over the field +
   50 ft buffer. Feeds the erosion app's slope-shooting basemap.
+  **Shipped** — `contour_lines` in `app/geoworker.py`.
 - **`flowlines-feature.md`** — MFD-extracted flow paths with per-line
   catchment polygons and Douglas-Peucker'd slope profiles. Feeds the
   erosion app's auto-suggest layer (planner-drawn is the override path).
   Has hard prerequisites in this wishlist — see notes on A2 and A4.
+  **Shipped** — `mfd_flowlines` in `app/geoworker.py`.
+- **`blended-topo-feature.md`** — multidirectional hillshade composited
+  over a color-relief elevation map ("USGS 10m topography layer"). A
+  basemap layer, not a wishlist graduate — documented here for parity.
+  **Shipped** — `topo_blended_public_10m` in `app/geoworker.py`.
 
 ## Framing
 

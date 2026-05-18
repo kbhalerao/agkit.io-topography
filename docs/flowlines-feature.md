@@ -10,7 +10,10 @@ Pairs with `contour-feature.md` — contours give the technician the visual
 basemap; flow lines give them a starting point. Same Lambda pipeline; both
 postback through the existing topography postback endpoint.
 
-Not yet implemented.
+**Status: implemented.** `LambdaGISProcessor.mfd_flowlines` ships in
+`app/geoworker.py` with tests in `tests/test_flowlines.py`. This doc is
+retained as the design rationale; the sections below describe the built
+pipeline. The Django-side wiring tracks separately in `agkit.io-backend`.
 
 ## Why MFD (not D8)
 

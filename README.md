@@ -36,7 +36,7 @@ and code structure are conserved; three new properties differentiate it:
                                                        │    └ scalars: poster.post_scalar(scalar_url, …)
                                                        ▼
 [Django: agkit.io-backend]
-  postback/raster/<field_id>/<token>/      ←── multipart (parameter, layer, file)
+  postback/raster/<field_id>/<token>/      ←── multipart (parameter, layer, file, extent)
   postback/scalar/<field_id>/<token>/      ←── JSON (parameter, value, units, …)
 ```
 
@@ -83,19 +83,38 @@ Download from: `https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIF
 Set on each job's `metadata.function_name`. Must match a method on
 `LambdaGISProcessor` (see `app/geoworker.py`).
 
-| function_name                       | kind    | postback   |
-|-------------------------------------|---------|------------|
-| `elev_public_10m`                   | raster  | raster     |
-| `slope_public_10m`                  | raster  | raster     |
-| `watershed_drainage`                | raster  | raster     |
-| `watershed_streambeds`              | raster  | raster     |
-| `watershed_spi`                     | raster  | raster     |
-| `watershed_tci`                     | raster  | raster     |
-| `watershed_length_slope_raster`     | raster  | raster (new) |
-| `watershed_slope_steepness_raster`  | raster  | raster (new) |
-| `watershed_length_slope`            | scalar  | scalar (new) |
-| `watershed_slope_steepness`         | scalar  | scalar (new) |
-| `rasterize_and_colorize`            | raster  | raster     |
+| function_name                       | kind    | postback          |
+|--------------------------------------|---------|-------------------|
+| `elev_public_10m`                    | raster  | raster            |
+| `slope_public_10m`                   | raster  | raster            |
+| `topo_blended_public_10m`            | raster  | raster (png)      |
+| `watershed_drainage`                 | raster  | raster            |
+| `watershed_streambeds`               | raster  | raster            |
+| `watershed_spi`                      | raster  | raster            |
+| `watershed_tci`                      | raster  | raster            |
+| `watershed_length_slope_raster`      | raster  | raster            |
+| `watershed_slope_steepness_raster`   | raster  | raster            |
+| `watershed_length_slope`             | scalar  | scalar            |
+| `watershed_slope_steepness`          | scalar  | scalar            |
+| `contour_lines`                      | vector  | raster (geojson)  |
+| `mfd_flowlines`                      | vector  | raster (geojson)  |
+| `rasterize_and_colorize`             | raster  | raster            |
+
+**Raster postback** — multipart `(parameter, layer, file, extent)`. The
+artifact is a PNG (with a sidecar GeoTIFF for the data layers); `extent` is
+its true bounds as `[west, south, east, north]` in EPSG:4326. PNG carries
+no georeferencing, so the bounds travel alongside it.
+
+**Vector postback** — `contour_lines` and `mfd_flowlines` produce a GeoJSON
+file and POST it through the *same* `postback/raster/…` endpoint; the
+`.geojson` file extension is the routing signal that sends it to the
+vector-layer upsert on the Django side. See `docs/contour-feature.md` and
+`docs/flowlines-feature.md`.
+
+**Blended topography** — `topo_blended_public_10m` emits a single finished
+RGBA PNG (no data tif): a multidirectional hillshade composited over a
+color-relief elevation map. See `docs/blended-topo-feature.md`.
 
 See `agkit.io-backend/tier2apps/topography/schema.py` for the canonical
-constants on the Django side.
+constants on the Django side, and `AWS_LAMBDA_EVENT_CONFIGURATION` for the
+job → parameter → layer wiring.

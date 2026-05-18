@@ -6,8 +6,11 @@ cross the fence. Primary consumer: the erosion app's slope-shooting UI,
 where the technician draws a representative slope profile over the contour
 basemap.
 
-Not yet implemented. Tracked separately from the SQS-trigger migration
-(which is complete).
+**Status: implemented.** `LambdaGISProcessor.contour_lines` ships in
+`app/geoworker.py` with tests in `tests/test_contour_lines.py`. This doc is
+retained as the design rationale; the sections below describe the built
+pipeline. The Django-side wiring (`schema.py`, `models.py`, `services.py`,
+`api_views.py`) tracks separately in `agkit.io-backend`.
 
 ## Visual contract
 

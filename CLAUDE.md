@@ -22,7 +22,7 @@ app/
 ├── grass_handler.py  # GRASS r.watershed; exports drainage/stream/spi/tci/L/LS
 ├── downloader.py     # USGS DEM tile fetch from prd-tnm (us-west-2)
 ├── ziphandler.py     # DEM tile clip-to-extent helper
-├── geocolorize.py    # PNG colorization via gdaldem color-relief
+├── geocolorize.py    # PNG colorization via gdaldem color-relief + blended_topo()
 ├── color_schemes.py  # Color ramps (elev / slope / drainage / tci / L / LS)
 ├── poster.py         # Signed-URL postback client (raster + scalar)
 ├── reducers.py       # Raster → scalar reduction over field polygon
@@ -63,14 +63,37 @@ One outer list, one item per job. Per-item shape:
 }
 ```
 
+Vector jobs (`contour_lines`, `mfd_flowlines`) use the same `output` shape
+with `"extension": "geojson"`; the file extension is the routing signal on
+the Django side.
+
+## Postback contract
+
+What the Lambda POSTs back to the signed URLs:
+
+- **Raster** (`postback/raster/...`): multipart form — `file` (PNG, plus a
+  sidecar GeoTIFF for data layers), `parameter`, `layer`, and `extent`.
+  `extent` is the artifact's true bounds, JSON-encoded as
+  `[west, south, east, north]` in EPSG:4326. PNG carries no georeferencing,
+  so the bounds travel with the file; Django stores them on the layer.
+- **Vector**: a `.geojson` file POSTed to the *same* `postback/raster/...`
+  endpoint. The `.geojson` extension routes it to the vector-layer upsert.
+- **Scalar** (`postback/scalar/...`): JSON — `parameter`, `value`, `units`.
+
 ## Adding a new geo function
 
 1. Add a method to `LambdaGISProcessor` in `app/geoworker.py`. Method
    signature is `def function_name(self, payload):`.
 2. Use `self.build_common_cache(payload)` to access shared field
    shapefile, DEM raster, and clipped DEM raster.
-3. For raster jobs, return `self.handle_posting(file, color_map, payload)`.
-   For scalar jobs, compute the scalar and call `Poster.post_scalar(...)`.
+3. Post the result, depending on the job kind:
+   - **Raster (data layer):** return `self.handle_posting(file, color_map,
+     payload)` — it colorizes the tif and posts PNG + tif with `extent`.
+   - **Raster (pre-built PNG):** return `self._post_built_raster(png,
+     payload, extent=...)` — no colorize step (e.g. blended topo).
+   - **Vector:** produce a `.geojson` file and post it with
+     `Poster.post_raster(...)`; the extension routes it server-side.
+   - **Scalar:** compute the scalar and call `Poster.post_scalar(...)`.
 4. Add a color ramp to `app/color_schemes.py` if needed.
 5. On the Django side, add the parameter constant to
    `tier2apps/topography/schema.py` and the job to
