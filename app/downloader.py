@@ -11,11 +11,14 @@ import os
 from shutil import copyfile
 
 import boto3
+from botocore import UNSIGNED
+from botocore.client import Config
 
 from app import settings
 
 
 _s3_client = None
+_usgs_s3_client = None
 
 
 def s3_client():
@@ -24,6 +27,21 @@ def s3_client():
     if _s3_client is None:
         _s3_client = boto3.client("s3", region_name=settings.AWS_REGION)
     return _s3_client
+
+
+def usgs_s3_client():
+    """Lazy boto3 S3 client for the public USGS `prd-tnm` Open Data
+    bucket. Uses unsigned (anonymous) requests: the bucket allows
+    anonymous reads, and the Lambda execution role has no IAM grant on
+    `prd-tnm`, so a signed request would 403 with AccessDenied."""
+    global _usgs_s3_client
+    if _usgs_s3_client is None:
+        _usgs_s3_client = boto3.client(
+            "s3",
+            region_name=settings.AWS_REGION,
+            config=Config(signature_version=UNSIGNED),
+        )
+    return _usgs_s3_client
 
 
 def file_downloader(bucket: str, key: str, download_path: str) -> None:
