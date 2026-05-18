@@ -7,9 +7,9 @@ dependencies = [
     "boto3>=1.34",
     "botocore>=1.34",
     "requests>=2.31",
-    # <2: base-image GDAL `gdal_array` is built against NumPy 1.x and
-    # crashes on import under NumPy 2.x. See requirements.txt.
-    "numpy>=1.26,<2",
+    # numpy is supplied by the Lambda base image (py3-numpy); listed here
+    # only so dev/test installs pull a compatible build. See requirements.txt.
+    "numpy>=2",
 ]
 
 [project.optional-dependencies]

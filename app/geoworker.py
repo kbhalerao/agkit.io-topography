@@ -237,7 +237,7 @@ class LambdaGISProcessor:
         try:
             gdal.DEMProcessing(
                 destName=f"{src}_slp.tif", srcDS=src_ds, processing="slope",
-                scale=scale, format="GTiff", options="-p",
+                scale=scale, format="GTiff", slopeFormat="percent",
             )
         finally:
             src_ds = None

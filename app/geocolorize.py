@@ -61,6 +61,11 @@ _HILLSHADE_ALPHA = 60.0
 # Gamma applied to the hillshade before compositing — deepens shadows.
 # LabCore: `(A / 255.) ** (1 / 0.5)`, i.e. an exponent of 2.0.
 _HILLSHADE_GAMMA_EXP = 2.0
+# Vertical exaggeration for the hillshade. GDAL 3.6+ is CRS-aware and
+# renders geographically-correct relief, which is near-flat for gentle
+# farmland; this factor exaggerates the elevations so the micro-topography
+# that matters for erosion reads clearly.
+_HILLSHADE_Z_FACTOR = 10
 
 
 class GeoColorize:
@@ -87,7 +92,7 @@ class GeoColorize:
                 processing="color-relief",
                 format="PNG",
                 colorFilename=color_txt,
-                options=["-q", "-alpha"],
+                addAlpha=True,
             )
         finally:
             src_ds = None
@@ -105,14 +110,12 @@ class GeoColorize:
         `elev_src` is a single-band elevation raster in EPSG:4326. Returns
         the path to the produced RGBA PNG (`{elev_src}_blended.png`).
         """
-        # 1. Multidirectional hillshade. The DEM is geographic (degrees), and
-        #    `-s` is deliberately omitted: leaving the degree-scale horizontal
-        #    units unscaled against the metre elevations applies a large
-        #    vertical exaggeration. That is the point — at true scale, gentle
-        #    farmland relief is invisible; the exaggeration is what reveals
-        #    the micro-topography. Matches LabCore's topo_colorize.
-        #    `-compute_edges` avoids a nodata border ring. Flags go through
-        #    the options list — the same mechanism colorize() uses.
+        # 1. Multidirectional hillshade with a vertical exaggeration. GDAL
+        #    3.6+ is CRS-aware: for a geographic DEM it computes
+        #    geographically-correct relief, which for gentle farmland is
+        #    nearly flat. zFactor exaggerates the elevations so the
+        #    micro-topography reads clearly; computeEdges avoids a nodata
+        #    border ring.
         hillshade_tif = f"{elev_src}_hs.tif"
         elev_ds = gdal.Open(elev_src)
         try:
@@ -121,7 +124,10 @@ class GeoColorize:
                 srcDS=elev_ds,
                 processing="hillshade",
                 format="GTiff",
-                options=["-q", "-multidirectional", "-alt", "45", "-compute_edges"],
+                multiDirectional=True,
+                altitude=45,
+                computeEdges=True,
+                zFactor=_HILLSHADE_Z_FACTOR,
             )
         finally:
             elev_ds = None
@@ -140,7 +146,7 @@ class GeoColorize:
                 processing="color-relief",
                 format="GTiff",
                 colorFilename=ramp_txt,
-                options=["-q", "-alpha"],
+                addAlpha=True,
             )
         finally:
             elev_ds = None
