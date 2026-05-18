@@ -60,6 +60,41 @@ def _cleanup(file_paths) -> None:
         pass
 
 
+def _raster_bounds_4326(path):
+    """Return a raster's bounds as ``[west, south, east, north]`` in
+    EPSG:4326.
+
+    PNG postback artifacts carry no georeferencing, so the bounds travel
+    alongside the file (see `poster.post_raster`). The posted rasters are
+    already geographic, but corners are reprojected defensively if not.
+    """
+    ds = gdal.Open(path)
+    try:
+        gt = ds.GetGeoTransform()
+        nx, ny = ds.RasterXSize, ds.RasterYSize
+        xs = [gt[0], gt[0] + nx * gt[1] + ny * gt[2]]
+        ys = [gt[3], gt[3] + nx * gt[4] + ny * gt[5]]
+        src_wkt = ds.GetProjection()
+    finally:
+        ds = None
+
+    src_srs = osr.SpatialReference()
+    if src_wkt:
+        src_srs.ImportFromWkt(src_wkt)
+    dst_srs = osr.SpatialReference()
+    dst_srs.ImportFromEPSG(4326)
+
+    if src_wkt and not src_srs.IsSame(dst_srs):
+        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        dst_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        ct = osr.CoordinateTransformation(src_srs, dst_srs)
+        pts = [ct.TransformPoint(x, y)[:2] for x in xs for y in ys]
+        lons = [p[0] for p in pts]
+        lats = [p[1] for p in pts]
+        return [min(lons), min(lats), max(lons), max(lats)]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
 class LambdaGISProcessor:
     """
     Job dispatcher with one method per named `function_name`.
@@ -202,7 +237,7 @@ class LambdaGISProcessor:
         try:
             gdal.DEMProcessing(
                 destName=f"{src}_slp.tif", srcDS=src_ds, processing="slope",
-                scale=scale, format="GTiff", options="-p",
+                scale=scale, format="GTiff", slopeFormat="percent",
             )
         finally:
             src_ds = None
@@ -351,6 +386,10 @@ class LambdaGISProcessor:
         signed `post_url`. Raster outputs go as multipart; png is
         derived from the tif via colorize.
         """
+        # `new_file` is the georeferenced source tif; the png is colorized
+        # from it, so both share these bounds. Sent on every postback so
+        # Django can place the (georef-less) png at its true extent.
+        extent = _raster_bounds_4326(new_file)
         responses = []
         for output in payload["post"]["output"]:
             ext = (output.get("extension") or "").lower()
@@ -374,6 +413,7 @@ class LambdaGISProcessor:
                 parameter=output.get("parameter", payload["post"].get("parameter", "")),
                 layer=output.get("layer", payload["post"].get("layer", "")),
                 filename=output.get("filename") or os.path.basename(outfile),
+                extent=extent,
             )
             if resp.ok:
                 responses.append(f"{label} file posted successfully.")
@@ -429,6 +469,51 @@ class LambdaGISProcessor:
         geo_slope_raster = self.gdal_warp_to_geo(slope_raster)
         result = self.gdal_warp_clip(geo_slope_raster, self.cache["field_shp"])
         return self.handle_posting(new_file=result, color_map="slope", payload=payload)
+
+    def _post_built_raster(self, file_path, payload, extent=None):
+        """Post an already-built raster artifact to every output slot as-is.
+
+        Unlike `handle_posting`, this does no colorize step — for handlers
+        that produce their own finished PNG (e.g. the blended topo layer).
+        """
+        responses = []
+        for output in payload["post"]["output"]:
+            if self.IN_TEST:
+                print(f"IN_TEST: skipping post for {output.get('parameter')}")
+                responses.append((payload["metadata"]["function_name"], file_path))
+                continue
+            resp = post_raster(
+                post_url=output["post_url"],
+                filepath=file_path,
+                parameter=output.get("parameter", payload["post"].get("parameter", "")),
+                layer=output.get("layer", payload["post"].get("layer", "")),
+                filename=output.get("filename") or os.path.basename(file_path),
+                extent=extent,
+            )
+            responses.append(
+                "PNG file posted successfully."
+                if resp.ok
+                else f"Error posting PNG file, status: {resp.status_code}.",
+            )
+        return responses
+
+    def topo_blended_public_10m(self, payload):
+        """Blended topography basemap — a multidirectional hillshade
+        composited over a color-relief elevation map (LabCore's "USGS 10m
+        topography layer"). Single RGBA PNG output, no data tif.
+
+        The blended PNG covers the clipped elevation's extent; `extent` is
+        derived from that source tif and sent on the postback so Django can
+        place the georef-less PNG precisely.
+        """
+        self.build_common_cache(payload)
+        elev = self.gdal_warp_clip(self.cache["dem_raster"], self.cache["field_shp"])
+        blended_png = GeoColorize(
+            folder=self.tmpdirname.rstrip("/"),
+        ).blended_topo(elev)
+        return self._post_built_raster(
+            blended_png, payload, extent=_raster_bounds_4326(elev),
+        )
 
     def watershed_drainage(self, payload):
         self.watershed_common(payload)
@@ -966,6 +1051,8 @@ class LambdaGISProcessor:
             )
             assert subprocess.call(colorize, shell=True) == 0, "Failed colorizing"
 
+            # png and tif_clip share the clipped tif's bounds.
+            extent = _raster_bounds_4326(tif_clip)
             for output in payload["post"]["output"]:
                 outfile = png if output["extension"] == "png" else tif_clip
                 if not self.IN_TEST:
@@ -975,6 +1062,7 @@ class LambdaGISProcessor:
                         parameter=output.get("parameter", parameter),
                         layer=output.get("layer", ""),
                         filename=output.get("filename") or os.path.basename(outfile),
+                        extent=extent,
                     )
 
             return tif_clip, png

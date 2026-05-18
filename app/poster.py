@@ -22,8 +22,9 @@ whole message on failure, which keeps the retry policy in one place.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 import requests
 
@@ -38,12 +39,21 @@ def post_raster(
     parameter: str,
     layer: str,
     filename: Optional[str] = None,
+    extent: Optional[Sequence[float]] = None,
 ) -> requests.Response:
-    """POST a raster artifact to its signed Django postback URL."""
+    """POST a raster artifact to its signed Django postback URL.
+
+    `extent`, when given, is the artifact's true bounds as
+    ``[west, south, east, north]`` in EPSG:4326. PNG carries no georef, so
+    Django stores this on the layer and the frontend overlays the image at
+    these exact bounds instead of stretching it to the field bbox.
+    """
     name = filename or filepath.rsplit("/", 1)[-1]
     with open(filepath, "rb") as fp:
         files = {"file": (name, fp)}
         data = {"parameter": parameter, "layer": layer or ""}
+        if extent is not None:
+            data["extent"] = json.dumps([float(v) for v in extent])
         response = requests.post(
             post_url,
             files=files,

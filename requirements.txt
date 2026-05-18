@@ -1,4 +1,7 @@
 boto3>=1.34
 botocore>=1.34
 requests>=2.31
-numpy>=1.26
+# numpy and pillow are intentionally NOT listed here — the base image
+# provides them as system packages (py3-numpy, py3-pillow) built against
+# its GDAL. Installing them via pip would shadow that build and break the
+# gdal_array ABI. See Dockerfile.
