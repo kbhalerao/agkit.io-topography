@@ -151,12 +151,22 @@ class GeoColorize:
         topo_ds = gdal.Open(topo_tif)
         background = topo_ds.ReadAsArray().astype(np.float64)  # (4, H, W) RGBA
 
-        # 4. Foreground = gamma-corrected grey hillshade, constant alpha 60,
+        # 4. Foreground = gamma-corrected, contrast-stretched grey hillshade.
+        #    LabCore applies the stretch via a 0%-100% grey color-relief
+        #    ramp, which re-expands the gamma-darkened values to the full
+        #    0-255 range. Without it the shaded relief reads as a muddy
+        #    mid-grey and the ridges lose definition. Constant alpha 60,
         #    transparent where the hillshade has no data (0).
+        valid = hillshade > 0
         gamma = np.clip(hillshade / 255.0, 0.0, 1.0) ** _HILLSHADE_GAMMA_EXP
         grey = gamma * 255.0
+        if valid.any():
+            lo = float(grey[valid].min())
+            hi = float(grey[valid].max())
+            if hi > lo:
+                grey = np.clip((grey - lo) / (hi - lo) * 255.0, 0.0, 255.0)
         fg_rgb = np.stack([grey, grey, grey])                          # (3, H, W)
-        fg_a = np.where(hillshade > 0, _HILLSHADE_ALPHA / 255.0, 0.0)   # (H, W)
+        fg_a = np.where(valid, _HILLSHADE_ALPHA / 255.0, 0.0)          # (H, W)
 
         # 5. Background = color-relief elevation; its alpha band carries 168
         #    on data, 0 on nodata.
