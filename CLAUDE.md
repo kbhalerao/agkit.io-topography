@@ -76,6 +76,37 @@ One outer list, one item per job. Per-item shape:
    `tier2apps/topography/schema.py` and the job to
    `settings.AWS_LAMBDA_EVENT_CONFIGURATION`.
 
+## Operational notes
+
+### SQS retry semantics — per-job errors are NOT retried
+
+`handler.py` implements the partial-batch contract (`batchItemFailures`),
+but in practice **a failed job never reaches the handler as an
+exception**. `geoworker.process_payload` catches per-job errors and
+returns an `"... resulted in ERROR."` string instead of raising, so the
+handler sees the record as processed and returns `failures: []`. The
+SQS message is consumed and never redriven.
+
+Consequence: a *transient* failure (e.g. a postback that times out, a
+DEM tile briefly unavailable) is lost — no SQS retry, no DLQ. Only a
+crash *outside* the per-job try/except (bad message body, OOM, GRASS
+init failure) produces a real `batchItemFailure` and gets retried.
+
+If a daughter project needs transient-failure retries, the job result
+must propagate back to the handler as a raised exception (or the
+handler must inspect result strings and append to `batchItemFailures`).
+
+### USGS DEM access — unsigned S3 client
+
+DEM tiles come from the public `prd-tnm` Open Data bucket. The Lambda
+execution role has **no IAM grant** on `prd-tnm` (by design — no static
+keys, minimal role). A *signed* `get_object` therefore fails with
+`AccessDenied`. `downloader.usgs_s3_client()` uses
+`signature_version=UNSIGNED` for anonymous reads, which need no IAM
+grant at all. The signed `s3_client()` is reserved for our own buckets
+(sidecar-zip fetches). Any daughter project reading `prd-tnm` must do
+the same — do not sign with the execution role.
+
 ## Cross-project references
 
 - Backend topography app: `agkit.io-backend/tier2apps/topography/`
