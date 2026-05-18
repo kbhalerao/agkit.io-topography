@@ -56,11 +56,6 @@ _TOPO_ELEVATION_RAMP = """nv 0 0 0 0
 96.875% 255 193 193 168
 100% 255 218 218 168"""
 
-# Scale for `gdaldem hillshade` on a geographic (EPSG:4326) DEM — degrees of
-# lat/long to metres, so relief is not wildly exaggerated. Same constant the
-# `slope()` deg→m path uses in geoworker.
-_DEG_TO_M = 111120
-
 # Foreground alpha for the grey hillshade, ported from LabCore's grey ramp.
 _HILLSHADE_ALPHA = 60.0
 # Gamma applied to the hillshade before compositing — deepens shadows.
@@ -110,10 +105,14 @@ class GeoColorize:
         `elev_src` is a single-band elevation raster in EPSG:4326. Returns
         the path to the produced RGBA PNG (`{elev_src}_blended.png`).
         """
-        # 1. Multidirectional hillshade. `-s` scales the geographic DEM so
-        #    relief is not wildly exaggerated; `-compute_edges` avoids a
-        #    nodata border ring. Flags go through the options list — the
-        #    same mechanism colorize() uses.
+        # 1. Multidirectional hillshade. The DEM is geographic (degrees), and
+        #    `-s` is deliberately omitted: leaving the degree-scale horizontal
+        #    units unscaled against the metre elevations applies a large
+        #    vertical exaggeration. That is the point — at true scale, gentle
+        #    farmland relief is invisible; the exaggeration is what reveals
+        #    the micro-topography. Matches LabCore's topo_colorize.
+        #    `-compute_edges` avoids a nodata border ring. Flags go through
+        #    the options list — the same mechanism colorize() uses.
         hillshade_tif = f"{elev_src}_hs.tif"
         elev_ds = gdal.Open(elev_src)
         try:
@@ -122,10 +121,7 @@ class GeoColorize:
                 srcDS=elev_ds,
                 processing="hillshade",
                 format="GTiff",
-                options=[
-                    "-q", "-multidirectional", "-alt", "45",
-                    "-s", str(_DEG_TO_M), "-compute_edges",
-                ],
+                options=["-q", "-multidirectional", "-alt", "45", "-compute_edges"],
             )
         finally:
             elev_ds = None
