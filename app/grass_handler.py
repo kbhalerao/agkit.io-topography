@@ -225,40 +225,6 @@ _ALBERS_PROJ4 = (
 )
 
 
-def _pick_seeds(flow_acc: np.ndarray, max_lines: int, min_flow_acc: int,
-                nms_radius_cells: int) -> list:
-    """
-    Top-N flow-accumulation cells with non-max suppression.
-
-    Returns `[(row, col, value), ...]` in descending value order, no two
-    seeds within `nms_radius_cells` Chebyshev distance.
-
-    Pure numpy, side-effect free — independently testable.
-    """
-    candidate_pool = max(max_lines * 4, max_lines)
-    flat_idx = np.argsort(flow_acc, axis=None)[::-1]
-    rows, cols = np.unravel_index(flat_idx, flow_acc.shape)
-
-    kept = []
-    inspected = 0
-    for r, c in zip(rows, cols):
-        v = flow_acc[r, c]
-        if v < min_flow_acc:
-            break
-        inspected += 1
-        too_close = any(
-            max(abs(int(r) - kr), abs(int(c) - kc)) <= nms_radius_cells
-            for kr, kc, _ in kept
-        )
-        if not too_close:
-            kept.append((int(r), int(c), float(v)))
-            if len(kept) >= max_lines:
-                break
-        if inspected >= candidate_pool and len(kept) >= 1:
-            break
-    return kept
-
-
 def _largest_polygon_wkt(geojson: dict) -> str:
     """Return the WKT of the largest Polygon/MultiPolygon in a FeatureCollection."""
     best = None

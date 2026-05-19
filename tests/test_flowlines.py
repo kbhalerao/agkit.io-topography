@@ -5,7 +5,6 @@ Three layers:
 
 * `DPSimplifierTests` — pure Python DP on (length, elevation) curves.
 * `ProfileShapeTests` — uniform / concave / convex / complex classifier.
-* `SeedPickingTests` — non-max suppression on flow_acc array.
 * `FlowLinesIntegrationTests` — runs the full GRASS pipeline against the
   test elevation tif; skipped when GRASS or osgeo isn't available locally.
 """
@@ -27,7 +26,6 @@ try:
     from app.grass_handler import (
         _divide_mask,
         _path_length_cells,
-        _pick_seeds,
         _trace_d8_path,
         get_mfd_flowlines_raw,
     )
@@ -124,43 +122,6 @@ class ProfileShapeTests(unittest.TestCase):
 
     def test_empty_segments_is_uniform(self):
         self.assertEqual(LambdaGISProcessor._classify_profile_shape([]), "uniform")
-
-
-@unittest.skipUnless(_NUMPY_AVAILABLE and _GRASS_HELPERS_AVAILABLE,
-                     "numpy or grass_handler helpers unavailable")
-class SeedPickingTests(unittest.TestCase):
-
-    def test_picks_top_n_by_value(self):
-        arr = np.zeros((10, 10))
-        arr[0, 0] = 100
-        arr[5, 5] = 200
-        arr[9, 9] = 150
-        seeds = _pick_seeds(arr, max_lines=3, min_flow_acc=50, nms_radius_cells=1)
-        self.assertEqual([s[2] for s in seeds], [200.0, 150.0, 100.0])
-
-    def test_nms_rejects_neighbors_within_radius(self):
-        arr = np.zeros((10, 10))
-        arr[5, 5] = 200
-        arr[5, 6] = 195   # adjacent — should be suppressed at radius=1
-        arr[0, 0] = 100   # far away — should survive
-        seeds = _pick_seeds(arr, max_lines=3, min_flow_acc=50, nms_radius_cells=1)
-        seed_values = [s[2] for s in seeds]
-        self.assertIn(200.0, seed_values)
-        self.assertNotIn(195.0, seed_values)
-        self.assertIn(100.0, seed_values)
-
-    def test_below_threshold_returns_empty(self):
-        arr = np.full((10, 10), 10.0)
-        seeds = _pick_seeds(arr, max_lines=5, min_flow_acc=50, nms_radius_cells=1)
-        self.assertEqual(seeds, [])
-
-    def test_max_lines_cap_respected(self):
-        arr = np.zeros((20, 20))
-        # Place 10 well-separated peaks
-        for i in range(10):
-            arr[i * 2, i * 2] = 100 + i
-        seeds = _pick_seeds(arr, max_lines=3, min_flow_acc=50, nms_radius_cells=1)
-        self.assertEqual(len(seeds), 3)
 
 
 @unittest.skipUnless(_NUMPY_AVAILABLE and _GRASS_HELPERS_AVAILABLE,
