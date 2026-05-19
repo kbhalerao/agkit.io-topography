@@ -24,7 +24,13 @@ except Exception:
     _GEOWORKER_AVAILABLE = False
 
 try:
-    from app.grass_handler import _pick_seeds, get_mfd_flowlines_raw
+    from app.grass_handler import (
+        _divide_mask,
+        _path_length_cells,
+        _pick_seeds,
+        _trace_d8_path,
+        get_mfd_flowlines_raw,
+    )
     _GRASS_HELPERS_AVAILABLE = True
 except Exception:
     _GRASS_HELPERS_AVAILABLE = False
@@ -155,6 +161,44 @@ class SeedPickingTests(unittest.TestCase):
             arr[i * 2, i * 2] = 100 + i
         seeds = _pick_seeds(arr, max_lines=3, min_flow_acc=50, nms_radius_cells=1)
         self.assertEqual(len(seeds), 3)
+
+
+@unittest.skipUnless(_NUMPY_AVAILABLE and _GRASS_HELPERS_AVAILABLE,
+                     "numpy or grass_handler helpers unavailable")
+class D8WalkTests(unittest.TestCase):
+    """Divide detection and downslope D8 walk — the RUSLE2 re-seed core."""
+
+    def test_path_length_orthogonal_and_diagonal(self):
+        self.assertAlmostEqual(
+            _path_length_cells([(0, 0), (0, 1), (0, 2)]), 2.0)
+        self.assertAlmostEqual(
+            _path_length_cells([(0, 0), (1, 1)]), 1.41421356, places=5)
+
+    def test_divide_mask_flags_only_the_unfed_cell(self):
+        # A 1x3 row, every cell draining East (code 8). Nothing drains into
+        # the westmost cell — it is the lone divide.
+        drainage = np.array([[8, 8, 8]], dtype=float)
+        mask = _divide_mask(drainage)
+        self.assertTrue(mask[0, 0])
+        self.assertFalse(mask[0, 1])
+        self.assertFalse(mask[0, 2])
+
+    def test_trace_stops_at_channel_head(self):
+        # Row of cells draining East; accumulation climbs 1..5. The walk
+        # halts on entering the first cell at/above the channel threshold.
+        drainage = np.array([[8, 8, 8, 8, 8]], dtype=float)
+        flow_acc = np.array([[1, 2, 3, 4, 5]], dtype=float)
+        path = _trace_d8_path(drainage, flow_acc, (0, 0),
+                              channel_threshold=4, max_steps=50)
+        self.assertEqual(path, [(0, 0), (0, 1), (0, 2), (0, 3)])
+
+    def test_trace_stops_at_raster_edge(self):
+        # No cell reaches the threshold — the walk runs to the edge.
+        drainage = np.array([[8, 8, 8]], dtype=float)
+        flow_acc = np.array([[1, 1, 1]], dtype=float)
+        path = _trace_d8_path(drainage, flow_acc, (0, 0),
+                              channel_threshold=999, max_steps=50)
+        self.assertEqual(path, [(0, 0), (0, 1), (0, 2)])
 
 
 @unittest.skipUnless(

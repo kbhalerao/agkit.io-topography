@@ -40,6 +40,7 @@ One outer list, one item per job. Per-item shape:
   "metadata": {
     "function_name": "watershed_length_slope_raster",
     "field_boundary": {"type": "FeatureCollection", "features": [...]},
+    "watershed_boundary": {"type": "FeatureCollection", "features": [...]},
     "field_id": 123,
     "site_prefix": "agkit",
     "input_data": null
@@ -66,6 +67,15 @@ One outer list, one item per job. Per-item shape:
 Vector jobs (`contour_lines`, `mfd_flowlines`) use the same `output` shape
 with `"extension": "geojson"`; the file extension is the routing signal on
 the Django side.
+
+`watershed_boundary` is **optional** — the user-selected analysis area
+that bounds the flow-computation domain (a HUC-12, a USGS grid cell, or a
+hand-drawn polygon; a FeatureCollection in EPSG:4326, one feature per
+selected polygon). Flow jobs (`watershed_*`, `mfd_flowlines`) size their
+DEM to its union bbox — `clipped_raster` for the field + ~220 m buffer,
+`watershed_raster` for the flow domain. `null` or absent falls back to the
+field-buffered domain; other jobs ignore it entirely. See
+`docs/watershed-bounded-flow-feature.md`.
 
 ## Postback contract
 

@@ -104,6 +104,11 @@ class LambdaGISProcessor:
     Lambda-local or hits the public USGS bucket via `app.ziphandler`.
     """
 
+    # Fallback DEM domain when no analysis area is selected: the field
+    # bbox padded by this many degrees (~220 m) — the pre-watershed
+    # behavior. See docs/watershed-bounded-flow-feature.md.
+    _FALLBACK_BUFFER_DEG = 0.002
+
     def __init__(self):
         self.IN_TEST = settings.IN_TEST
         self.cleanup = False
@@ -170,8 +175,65 @@ class LambdaGISProcessor:
         env = geom.GetEnvelope()
         return (env[0], env[2], env[1], env[3])
 
-    def get_dem(self, dem_tile_lat, dem_tile_long, field_extent=None, download_folder="dem/"):
-        """Retrieve a single DEM raster by lat/long of the NW corner."""
+    # ----- analysis-extent helpers (watershed-bounded flow) -------------
+
+    @staticmethod
+    def _buffer_extent(extent, buffer_deg):
+        """Pad an ``(xmin, ymin, xmax, ymax)`` bbox by `buffer_deg` on all
+        sides."""
+        return (
+            extent[0] - buffer_deg, extent[1] - buffer_deg,
+            extent[2] + buffer_deg, extent[3] + buffer_deg,
+        )
+
+    @staticmethod
+    def _union_extent(a, b):
+        """Smallest ``(xmin, ymin, xmax, ymax)`` bbox enclosing both inputs."""
+        return (
+            min(a[0], b[0]), min(a[1], b[1]),
+            max(a[2], b[2]), max(a[3], b[3]),
+        )
+
+    @staticmethod
+    def _watershed_extent(watershed_boundary):
+        """Union bbox ``(xmin, ymin, xmax, ymax)`` of a `watershed_boundary`
+        FeatureCollection, or ``None`` when it carries no usable polygon.
+
+        `watershed_boundary` is the user-selected analysis area (see
+        `docs/watershed-bounded-flow-feature.md`). Accepts the dict form or
+        a JSON string — mirroring how `field_boundary` may arrive — and
+        treats null / empty / geometry-less input as "no selection", which
+        routes the caller to the field-buffered fallback domain.
+        """
+        if not watershed_boundary:
+            return None
+        if isinstance(watershed_boundary, str):
+            try:
+                watershed_boundary = json.loads(watershed_boundary)
+            except (ValueError, TypeError):
+                return None
+        features = (watershed_boundary or {}).get("features") or []
+        xmin = ymin = float("inf")
+        xmax = ymax = float("-inf")
+        found = False
+        for feat in features:
+            geom = (feat or {}).get("geometry")
+            if not geom:
+                continue
+            ogeom = ogr.CreateGeometryFromJson(json.dumps(geom))
+            if ogeom is None or ogeom.IsEmpty():
+                continue
+            gx0, gx1, gy0, gy1 = ogeom.GetEnvelope()
+            xmin, xmax = min(xmin, gx0), max(xmax, gx1)
+            ymin, ymax = min(ymin, gy0), max(ymax, gy1)
+            found = True
+        return (xmin, ymin, xmax, ymax) if found else None
+
+    def get_dem(self, dem_tile_lat, dem_tile_long, clip_extent=None, download_folder="dem/"):
+        """Retrieve a single DEM raster by lat/long of the NW corner.
+
+        `clip_extent`, when given, is the ``(xmin, ymin, xmax, ymax)`` bbox
+        the tile is clipped to on download (keeps `/tmp` small)."""
         dem_tile_long = ("0" + str(dem_tile_long))[-3:]
         demfn = f"USGS_13_n{dem_tile_lat}w{dem_tile_long}.tif"
 
@@ -188,36 +250,39 @@ class LambdaGISProcessor:
 
         try:
             print("DEM lambda download path:  ", dem_path)
-            dem_path = handle_USGS_DEM(usgs_s3_client(), dem_folder, dem_tile_lat, dem_tile_long, field_extent)
+            dem_path = handle_USGS_DEM(usgs_s3_client(), dem_folder, dem_tile_lat, dem_tile_long, clip_extent)
             if dem_path:
                 return dem_path
         except Exception as exc:
             print(f"DEM fetch failed for n{dem_tile_lat}w{dem_tile_long}: {exc}")
         return None
 
-    def get_dem_raster_set(self, field_geojson):
-        """List of DEM tiles intersecting the field."""
-        field_extent = self.get_field_extent(field_geojson)
+    def get_dem_raster_set(self, extent):
+        """List of DEM tiles intersecting `extent` — an
+        ``(xmin, ymin, xmax, ymax)`` bbox in EPSG:4326. Each tile is
+        clipped-on-download to `extent`."""
         long_west, lat_south, long_east, lat_north = (
-            self._round_higher(field_extent[0]),
-            self._round_higher(field_extent[1]),
-            self._round_higher(field_extent[2]),
-            self._round_higher(field_extent[3]),
+            self._round_higher(extent[0]),
+            self._round_higher(extent[1]),
+            self._round_higher(extent[2]),
+            self._round_higher(extent[3]),
         )
         dems = []
         lat_range = range(lat_south, lat_north + 1) if lat_north - lat_south > 0 else [lat_north]
         long_range = range(long_east, long_west + 1) if long_west - long_east > 0 else [long_west]
         for lat in lat_range:
             for lng in long_range:
-                dem = self.get_dem(lat, lng, field_extent)
+                dem = self.get_dem(lat, lng, extent)
                 if dem:
                     dems.append(dem)
         return dems
 
-    def get_elev_raster(self, field_geojson):
-        dem_rasters = self.get_dem_raster_set(field_geojson)
+    def get_elev_raster(self, extent):
+        """Merged DEM covering `extent` ``(xmin, ymin, xmax, ymax)``,
+        EPSG:4326."""
+        dem_rasters = self.get_dem_raster_set(extent)
         if not dem_rasters:
-            raise Exception("No DEM rasters intersect the field")
+            raise Exception("No DEM rasters intersect the analysis extent")
         if len(dem_rasters) > 1:
             return self.combine_rasters(dem_rasters)
         return dem_rasters[0]
@@ -276,20 +341,18 @@ class LambdaGISProcessor:
         shape_data.Destroy()
         return out_shapefile
 
-    def gdal_bufferred_clip(self, dem_raster, field_shp, buffer=0.002):
-        """Clip raster to field extent + a small buffer (edge effects)."""
-        shp_extent = self.get_shapefile_extent(field_shp)
-        new_extent = [
-            shp_extent[0] - buffer,
-            shp_extent[1] - buffer,
-            shp_extent[2] + buffer,
-            shp_extent[3] + buffer,
-        ]
+    def gdal_clip_to_bounds(self, dem_raster, extent):
+        """Clip `dem_raster` to an explicit ``(xmin, ymin, xmax, ymax)``
+        bbox in EPSG:4326.
+
+        `gdal.Warp` pads with nodata where the bbox extends past the
+        source raster — harmless here: the result is always re-clipped to
+        the field (or field + 50 ft) before postback."""
         with NamedTemporaryFile(suffix=".tif", delete=False) as temp:
             gdal.Warp(
                 temp.name, dem_raster,
                 srcNodata=0, dstNodata=0,
-                outputBounds=new_extent, format="GTiff",
+                outputBounds=list(extent), format="GTiff",
             )
         return temp.name
 
@@ -362,21 +425,61 @@ class LambdaGISProcessor:
     # ----- common cache -------------------------------------------------
 
     def build_common_cache(self, payload):
+        """Field shapefile + DEM rasters shared across every job in a batch.
+
+        Two clipped DEMs are produced:
+
+        * ``clipped_raster`` — field bbox + ~220 m buffer
+          (``_FALLBACK_BUFFER_DEG``). The domain for contours, slope, and
+          the fallback flow domain.
+        * ``watershed_raster`` — the flow-computation domain. With a
+          ``watershed_boundary`` in the metadata (the user-selected
+          analysis polygon), this is that polygon's union bbox; without
+          one it aliases ``clipped_raster``.
+
+        Both are clipped from a single merged DEM fetched at the union of
+        the two extents, so the on-disk tile cache serves both clips
+        consistently. See docs/watershed-bounded-flow-feature.md.
+        """
         if self.cache:
             return
-        field_shp = self.get_shapefile_from_geojson_ogr(payload["metadata"]["field_boundary"])
-        dem_raster = self.get_elev_raster(payload["metadata"]["field_boundary"])
-        clipped_raster = self.gdal_bufferred_clip(dem_raster, field_shp)
+        meta = payload["metadata"]
+        field_shp = self.get_shapefile_from_geojson_ogr(meta["field_boundary"])
+
+        field_extent = self.get_field_extent(meta["field_boundary"])
+        buffered_extent = self._buffer_extent(
+            field_extent, self._FALLBACK_BUFFER_DEG,
+        )
+        ws_extent = self._watershed_extent(meta.get("watershed_boundary"))
+        flow_extent = ws_extent if ws_extent is not None else buffered_extent
+
+        dem_raster = self.get_elev_raster(
+            self._union_extent(buffered_extent, flow_extent),
+        )
         self.cache["field_shp"] = field_shp
         self.cache["dem_raster"] = dem_raster
-        self.cache["clipped_raster"] = clipped_raster
+        self.cache["clipped_raster"] = self.gdal_clip_to_bounds(
+            dem_raster, buffered_extent,
+        )
+        if ws_extent is None:
+            # No analysis area selected — flow jobs fall back to the
+            # field-buffered domain (the pre-watershed behavior).
+            self.cache["watershed_raster"] = self.cache["clipped_raster"]
+            self.cache["flow_domain"] = "field_buffer"
+        else:
+            self.cache["watershed_raster"] = self.gdal_clip_to_bounds(
+                dem_raster, flow_extent,
+            )
+            self.cache["flow_domain"] = "watershed"
 
     def watershed_common(self, payload):
         self.build_common_cache(payload)
         if "watershed" in self.cache:
             return
         os.makedirs("/tmp/watershed", exist_ok=True)
-        self.cache["watershed"] = get_watershed_maps(self.cache["clipped_raster"], "/tmp/watershed")
+        self.cache["watershed"] = get_watershed_maps(
+            self.cache["watershed_raster"], "/tmp/watershed",
+        )
 
     # ----- posting glue -------------------------------------------------
 
@@ -899,12 +1002,16 @@ class LambdaGISProcessor:
 
     def mfd_flowlines(self, payload):
         """
-        Suggest representative RUSLE2 slope profiles for the field.
+        Representative RUSLE2 hillslope profiles plus the field's draw
+        network, as one GeoJSON FeatureCollection. Features are tagged by
+        `kind`:
 
-        For each kept line: D8-routed path geometry, D8 catchment polygon
-        (WKT in properties), simplified slope profile (≤ 6 segments by
-        default), shape classification, and accumulation rank. Output is a
-        single GeoJSON FeatureCollection.
+        - `hillslope`: ridge→channel transect — D8 path geometry, D8
+          catchment polygon (WKT in properties), simplified slope profile
+          (≤ 6 segments), shape classification, accumulation rank. Sheet &
+          rill erosion (RUSLE2 LS).
+        - `draw`: a concentrated-flow channel traced head→outlet — geometry,
+          length, accumulation rank. Ephemeral-gully erosion.
 
         Empty FeatureCollection on flat fields — see ENGINE.md / spec.
         """
@@ -915,7 +1022,8 @@ class LambdaGISProcessor:
 
         options = (payload.get("metadata") or {}).get("input_data") or {}
         raw_lines = get_mfd_flowlines_raw(
-            self.cache["clipped_raster"], outdir, options=options,
+            self.cache["watershed_raster"], outdir, options=options,
+            field_shp=self.cache["field_shp"],
         )
 
         # Build cutline geometries up front. Lines clip to field+50 ft,
@@ -931,6 +1039,36 @@ class LambdaGISProcessor:
 
         features = []
         for raw in raw_lines:
+            # Draw records (concentrated-flow channels) carry only a line —
+            # no slope profile or hillslope zone. Clip to field + 50 ft and
+            # emit; MultiLineString is allowed (a draw may cross the fence).
+            if raw.get("kind") == "draw":
+                clipped = self._clip_wkt_to_cutline(
+                    raw["line_wkt"], line_cutline,
+                )
+                if clipped is None:
+                    continue
+                draw_geom = ogr.CreateGeometryFromWkt(clipped)
+                if draw_geom is None or draw_geom.IsEmpty():
+                    continue
+                draw_profile = raw.get("profile_vertices_m") or []
+                draw_len_ft = (
+                    round(draw_profile[-1][0] * self._FT_PER_M, 1)
+                    if draw_profile else 0.0
+                )
+                features.append({
+                    "type": "Feature",
+                    "geometry": json.loads(draw_geom.ExportToJson()),
+                    "properties": {
+                        "kind": "draw",
+                        "rank": raw["rank"],
+                        "flow_accumulation_cells": raw["flow_accumulation_cells"],
+                        "total_length_ft": draw_len_ft,
+                        "source": "auto_mfd",
+                    },
+                })
+                continue
+
             # Convert profile to feet
             profile_ft = [
                 (cum_m * self._FT_PER_M, elev_m * self._FT_PER_M)
@@ -983,6 +1121,7 @@ class LambdaGISProcessor:
                 "type": "Feature",
                 "geometry": line_geojson,
                 "properties": {
+                    "kind": "hillslope",
                     "rank": raw["rank"],
                     "flow_accumulation_cells": raw["flow_accumulation_cells"],
                     "total_length_ft": round(total_length_ft, 1),

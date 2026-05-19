@@ -126,11 +126,13 @@ input raster.
 
 ## Buffer & clip
 
-- Reuse `clipped_raster` from `build_common_cache()` — 220 m bbox-buffered
-  DEM. The buffer matters more here than for contours: an MFD path that
-  exits the field needs the downstream cells visible so the flow direction
-  is computed correctly at the boundary, otherwise paths terminate
-  abruptly at the fence in a way that looks wrong on the map.
+- Use `watershed_raster` from `build_common_cache()` — the flow-computation
+  DEM. When the job carries a `watershed_boundary` this is the
+  user-selected analysis polygon's bbox; otherwise it falls back to the
+  220 m bbox-buffered DEM. Either way the upslope cells must be visible so
+  the flow direction is computed correctly at the field boundary —
+  otherwise paths terminate abruptly at the fence in a way that looks wrong
+  on the map. See `docs/watershed-bounded-flow-feature.md`.
 - **Lines** are clipped to `field_shp.buffer(50 ft)` (same as contours) so
   the line stays visible across the fence but doesn't shoot off into the
   neighbor's field.
