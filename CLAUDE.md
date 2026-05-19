@@ -20,8 +20,8 @@ app/
 ├── handler.py        # SQS event router (entrypoint: app.handler.handler)
 ├── geoworker.py      # LambdaGISProcessor — named function-per-parameter
 ├── grass_handler.py  # GRASS r.watershed; exports drainage/stream/spi/tci/L/LS
-├── downloader.py     # USGS DEM tile fetch from prd-tnm (us-west-2)
-├── ziphandler.py     # DEM tile clip-to-extent helper
+├── downloader.py     # S3 fetch helpers for our own buckets (sidecar zips)
+├── ziphandler.py     # USGS DEM tile read (/vsis3/) + clip-to-extent
 ├── geocolorize.py    # PNG colorization via gdaldem color-relief + blended_topo()
 ├── color_schemes.py  # Color ramps (elev / slope / drainage / tci / L / LS)
 ├── poster.py         # Signed-URL postback client (raster + scalar)
@@ -129,16 +129,24 @@ If a daughter project needs transient-failure retries, the job result
 must propagate back to the handler as a raised exception (or the
 handler must inspect result strings and append to `batchItemFailures`).
 
-### USGS DEM access — unsigned S3 client
+### USGS DEM access — `/vsis3/` range reads, unsigned
 
-DEM tiles come from the public `prd-tnm` Open Data bucket. The Lambda
-execution role has **no IAM grant** on `prd-tnm` (by design — no static
-keys, minimal role). A *signed* `get_object` therefore fails with
-`AccessDenied`. `downloader.usgs_s3_client()` uses
-`signature_version=UNSIGNED` for anonymous reads, which need no IAM
-grant at all. The signed `s3_client()` is reserved for our own buckets
-(sidecar-zip fetches). Any daughter project reading `prd-tnm` must do
-the same — do not sign with the execution role.
+DEM tiles come from the public `prd-tnm` Open Data bucket. They are
+valid Cloud-Optimized GeoTIFFs (256×256 internal tiling + overviews),
+so `ziphandler.download_USGS_dem` reads them in place via GDAL's
+`/vsis3/` and clips with `gdal.Translate` — only the blocks
+overlapping the field/watershed window are transferred over HTTP
+range requests, not the full ~440 MB tile.
+
+The Lambda execution role has **no IAM grant** on `prd-tnm` (by
+design — no static keys, minimal role), and the bucket allows
+anonymous reads, so GDAL is told not to sign: `AWS_NO_SIGN_REQUEST=YES`
+(set via `gdal.SetConfigOption`, alongside `AWS_REGION` and
+`GDAL_HTTP_MAX_RETRY`). A *signed* request would 403 with
+`AccessDenied`. The boto3 `s3_client()` in `downloader.py` is reserved
+for our own buckets (sidecar-zip fetches) and is unaffected. Any
+daughter project reading `prd-tnm` must do the same — do not sign with
+the execution role.
 
 ## Cross-project references
 

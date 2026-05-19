@@ -16,11 +16,11 @@ import os
 
 # ---------------------------------------------------------------------------
 # USGS public DEM dataset (us-west-2). Co-located with the Lambda → free read.
+# Tiles are read in place over GDAL `/vsis3/` (see ziphandler.download_USGS_dem).
 # ---------------------------------------------------------------------------
 USGS_13_DEM_BUCKET = "prd-tnm"
-USGS_13_DEM_URL_PREFIX = f"https://{USGS_13_DEM_BUCKET}.s3.amazonaws.com/"
 USGS_13_KEY_PREFIX = "StagedProducts/Elevation/13/TIFF/current/"
-# Example: https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/n41w088/USGS_13_n41w088.tif
+# Example tile: s3://prd-tnm/StagedProducts/Elevation/13/TIFF/current/n41w088/USGS_13_n41w088.tif
 
 
 # ---------------------------------------------------------------------------

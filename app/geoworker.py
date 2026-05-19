@@ -39,7 +39,7 @@ from app.grass_handler import (
 from app.poster import post_raster, post_scalar
 from app.reducers import reduce_length_slope, reduce_slope_steepness
 from app.ziphandler import download_and_unzip, handle_USGS_DEM
-from app.downloader import get_path, s3_client, usgs_s3_client
+from app.downloader import get_path, s3_client
 
 
 gdal.UseExceptions()
@@ -250,7 +250,7 @@ class LambdaGISProcessor:
 
         try:
             print("DEM lambda download path:  ", dem_path)
-            dem_path = handle_USGS_DEM(usgs_s3_client(), dem_folder, dem_tile_lat, dem_tile_long, clip_extent)
+            dem_path = handle_USGS_DEM(dem_folder, dem_tile_lat, dem_tile_long, clip_extent)
             if dem_path:
                 return dem_path
         except Exception as exc:

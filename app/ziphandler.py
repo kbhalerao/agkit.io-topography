@@ -1,103 +1,97 @@
 """
 USGS DEM tile retrieval + supporting zip helpers.
 
-Ported from USGS2021. DEM tiles are pulled directly from the public
-`prd-tnm` bucket (us-west-2) — Lambda is co-located, so same-region
-S3 reads are free and no caching is needed.
+Ported from USGS2021. DEM tiles live in the public `prd-tnm` bucket
+(us-west-2). The tiles are valid Cloud-Optimized GeoTIFFs (256x256
+internal tiling + overviews), so GDAL reads them in place over
+`/vsis3/` with HTTP range requests — only the blocks overlapping the
+requested window are transferred, not the full ~440 MB tile. No
+caching needed; the Lambda is co-located with the bucket.
 """
 import os
 import tempfile
-import time
 import zipfile
 
-from osgeo import gdal, osr
+from osgeo import gdal
 
 from app import settings
 from app.downloader import file_downloader
 
 
-def download_USGS_dem(s3_client, dem_folder, dem_tile_lat, dem_tile_long, field_extent=None):
+# `prd-tnm` allows anonymous reads and the Lambda execution role has no
+# IAM grant on it, so GDAL must not sign with the role's credentials.
+# A handful of retries covers transient range-read hiccups.
+_VSIS3_CONFIG = {
+    "AWS_NO_SIGN_REQUEST": "YES",
+    "AWS_REGION": settings.AWS_REGION,
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "1",
+}
+
+
+def download_USGS_dem(dem_folder, dem_tile_lat, dem_tile_long, field_extent=None):
     """
-    Download a single USGS 1/3 arc-second DEM tile to `dem_folder`.
+    Fetch a single USGS 1/3 arc-second DEM tile into `dem_folder`,
+    clipped to `field_extent` if given.
 
     Tile naming follows the northwest-corner convention: a tile at
     (lat=41, long=88) covers 40°-41°N, 88°-87°W and is keyed
-    `n41w088`. If `field_extent` is provided, the tile is clipped to
-    the field extent (+ a small buffer) in-place via `gdal.Translate`.
+    `n41w088`. The source COG is read over `/vsis3/` and clipped with
+    `gdal.Translate`, so a small `field_extent` only pulls the
+    overlapping blocks rather than the whole tile.
     """
     dem_tile_long = ("0" + str(dem_tile_long))[-3:]
-    if not os.path.exists(dem_folder):
-        os.mkdir(dem_folder)
+    os.makedirs(dem_folder, exist_ok=True)
 
     folder = f"n{dem_tile_lat}w{dem_tile_long}"
     file = f"USGS_13_{folder}.tif"
     key = f"{settings.USGS_13_KEY_PREFIX}{folder}/{file}"
 
-    print(f"Downloading DEM tile from USGS: {key}")
-    start = time.perf_counter()
-    if not settings.IN_TEST:
-        s3_response_object = s3_client.get_object(
-            Bucket=settings.USGS_13_DEM_BUCKET, Key=f"{key}",
-        )
-        object_content = s3_response_object["Body"].read()
-        print(f"Downloaded from USGS prd-tnm, took {time.perf_counter() - start:.2f}s")
-    else:
+    if settings.IN_TEST:
         print("In test: using local file")
-        with open(f"tests/{file}", "rb") as f:
-            object_content = f.read()
+        source = f"tests/{file}"
+    else:
+        source = f"/vsis3/{settings.USGS_13_DEM_BUCKET}/{key}"
+        for opt, value in _VSIS3_CONFIG.items():
+            gdal.SetConfigOption(opt, value)
 
     usgs_tif = os.path.join(dem_folder, file)
-    if not os.path.exists(os.path.dirname(usgs_tif)):
-        os.makedirs(os.path.dirname(usgs_tif), exist_ok=True)
 
+    translate_kwargs = dict(
+        noData=0,
+        format="GTiff",
+        outputType=gdal.gdalconst.GDT_Float32,
+        creationOptions=["COMPRESS=LZW"],
+    )
     if field_extent is not None:
-        # field_extent is (long_west, lat_north, long_east, lat_south).
-        # gdal.Translate projWin wants [ulx, uly, lrx, lry].
-        new_extent = [
+        # field_extent is (xmin, ymin, xmax, ymax) in EPSG:4326.
+        # gdal.Translate projWin wants [ulx, uly, lrx, lry] — i.e.
+        # [west, north, east, south] — with a small buffer added.
+        translate_kwargs["projWin"] = [
             field_extent[0] - 0.003,
             field_extent[3] + 0.003,
             field_extent[2] + 0.003,
             field_extent[1] - 0.003,
         ]
-        print("New extent for usgs tif from field extent:  ", new_extent)
-        src_srs = osr.SpatialReference()
-        res = src_srs.ImportFromProj4(
-            "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs",
-        )
-        if res != 0:
-            raise RuntimeError(f"{res}: could not import EPSG:4326 from proj4")
+        print("Clipping USGS tile to extent:  ", translate_kwargs["projWin"])
 
-        in_mem_dem = "/vsimem/dem.tif"
-        gdal.FileFromMemBuffer(in_mem_dem, object_content)
-        src_ds = gdal.Open(in_mem_dem)
-        try:
-            gdal.Translate(
-                usgs_tif, src_ds,
-                outputSRS=src_srs,
-                noData=0,
-                projWin=new_extent,
-                format="GTiff",
-                outputType=gdal.gdalconst.GDT_Float32,
-                creationOptions=["COMPRESS=LZW"],
-            )
-        finally:
-            src_ds = None
-            gdal.Unlink(in_mem_dem)
-    else:
-        with open(usgs_tif, "wb") as f:
-            f.write(object_content)
+    print(f"Reading DEM tile: {source}")
+    out_ds = gdal.Translate(usgs_tif, source, **translate_kwargs)
+    if out_ds is None:
+        raise RuntimeError(f"gdal.Translate produced no output for {source}")
+    out_ds = None  # flush to disk
 
     return usgs_tif, [usgs_tif]
 
 
-def handle_USGS_DEM(s3_client, dem_folder, dem_tile_lat, dem_tile_long, field_extent=None):
-    """Wrapper that swallows download errors and returns a tif path or None."""
+def handle_USGS_DEM(dem_folder, dem_tile_lat, dem_tile_long, field_extent=None):
+    """Wrapper that swallows fetch errors and returns a tif path or None."""
     try:
         usgs_tif, _ = download_USGS_dem(
-            s3_client, dem_folder, dem_tile_lat, dem_tile_long, field_extent,
+            dem_folder, dem_tile_lat, dem_tile_long, field_extent,
         )
     except Exception as exc:
-        print("Error downloading USGS DEM, ", exc)
+        print("Error fetching USGS DEM, ", exc)
         return None
     return usgs_tif
 
