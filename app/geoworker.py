@@ -899,12 +899,16 @@ class LambdaGISProcessor:
 
     def mfd_flowlines(self, payload):
         """
-        Suggest representative RUSLE2 slope profiles for the field.
+        Representative RUSLE2 hillslope profiles plus the field's draw
+        network, as one GeoJSON FeatureCollection. Features are tagged by
+        `kind`:
 
-        For each kept line: D8-routed path geometry, D8 catchment polygon
-        (WKT in properties), simplified slope profile (≤ 6 segments by
-        default), shape classification, and accumulation rank. Output is a
-        single GeoJSON FeatureCollection.
+        - `hillslope`: ridge→channel transect — D8 path geometry, D8
+          catchment polygon (WKT in properties), simplified slope profile
+          (≤ 6 segments), shape classification, accumulation rank. Sheet &
+          rill erosion (RUSLE2 LS).
+        - `draw`: a concentrated-flow channel traced head→outlet — geometry,
+          length, accumulation rank. Ephemeral-gully erosion.
 
         Empty FeatureCollection on flat fields — see ENGINE.md / spec.
         """
@@ -916,6 +920,7 @@ class LambdaGISProcessor:
         options = (payload.get("metadata") or {}).get("input_data") or {}
         raw_lines = get_mfd_flowlines_raw(
             self.cache["clipped_raster"], outdir, options=options,
+            field_shp=self.cache["field_shp"],
         )
 
         # Build cutline geometries up front. Lines clip to field+50 ft,
@@ -931,6 +936,36 @@ class LambdaGISProcessor:
 
         features = []
         for raw in raw_lines:
+            # Draw records (concentrated-flow channels) carry only a line —
+            # no slope profile or hillslope zone. Clip to field + 50 ft and
+            # emit; MultiLineString is allowed (a draw may cross the fence).
+            if raw.get("kind") == "draw":
+                clipped = self._clip_wkt_to_cutline(
+                    raw["line_wkt"], line_cutline,
+                )
+                if clipped is None:
+                    continue
+                draw_geom = ogr.CreateGeometryFromWkt(clipped)
+                if draw_geom is None or draw_geom.IsEmpty():
+                    continue
+                draw_profile = raw.get("profile_vertices_m") or []
+                draw_len_ft = (
+                    round(draw_profile[-1][0] * self._FT_PER_M, 1)
+                    if draw_profile else 0.0
+                )
+                features.append({
+                    "type": "Feature",
+                    "geometry": json.loads(draw_geom.ExportToJson()),
+                    "properties": {
+                        "kind": "draw",
+                        "rank": raw["rank"],
+                        "flow_accumulation_cells": raw["flow_accumulation_cells"],
+                        "total_length_ft": draw_len_ft,
+                        "source": "auto_mfd",
+                    },
+                })
+                continue
+
             # Convert profile to feet
             profile_ft = [
                 (cum_m * self._FT_PER_M, elev_m * self._FT_PER_M)
@@ -983,6 +1018,7 @@ class LambdaGISProcessor:
                 "type": "Feature",
                 "geometry": line_geojson,
                 "properties": {
+                    "kind": "hillslope",
                     "rank": raw["rank"],
                     "flow_accumulation_cells": raw["flow_accumulation_cells"],
                     "total_length_ft": round(total_length_ft, 1),

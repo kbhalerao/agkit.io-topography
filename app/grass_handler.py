@@ -19,7 +19,7 @@ import sys
 import uuid
 
 import numpy as np
-from osgeo import ogr, osr
+from osgeo import gdal, ogr, osr
 
 
 # Outputs from r.watershed that we always export as rasters.
@@ -259,28 +259,6 @@ def _pick_seeds(flow_acc: np.ndarray, max_lines: int, min_flow_acc: int,
     return kept
 
 
-def _extract_single_linestring(geojson: dict):
-    """
-    Return `[(x, y), ...]` for the single LineString in `geojson`, or None
-    if the FeatureCollection contains a MultiLineString (no-data hole — drop
-    per spec) or no LineString at all.
-    """
-    features = geojson.get("features", [])
-    if not features:
-        return None
-    coords = []
-    for feat in features:
-        geom = feat.get("geometry") or {}
-        gtype = geom.get("type")
-        if gtype == "LineString":
-            coords.extend(geom["coordinates"])
-        elif gtype == "MultiLineString":
-            return None
-    if len(coords) < 2:
-        return None
-    return [(float(c[0]), float(c[1])) for c in coords]
-
-
 def _largest_polygon_wkt(geojson: dict) -> str:
     """Return the WKT of the largest Polygon/MultiPolygon in a FeatureCollection."""
     best = None
@@ -344,27 +322,154 @@ def _build_profile(line_vertices, filled_arr, x0, y0, ew_res, ns_res) -> list:
     return profile
 
 
-def get_mfd_flowlines_raw(elev_tif: str, outdir: str, options=None) -> list:
+# r.watershed D8 `drainage` encoding → (drow, dcol). The row index increases
+# southward. 1=NE 2=N 3=NW 4=W 5=SW 6=S 7=SE 8=E (CCW from NE); a negative
+# value means the cell drains off-region, 0 means an unresolved depression.
+_D8_DELTAS = {
+    1: (-1, 1), 2: (-1, 0), 3: (-1, -1), 4: (0, -1),
+    5: (1, -1), 6: (1, 0), 7: (1, 1), 8: (0, 1),
+}
+
+
+def _trace_d8_path(drainage, flow_acc, start, channel_threshold, max_steps):
     """
-    Run the MFD flow-line extraction pipeline against `elev_tif`
+    Walk the r.watershed D8 `drainage` array downslope from `start`
+    (row, col), stopping at the first channel cell — one whose absolute
+    flow accumulation reaches `channel_threshold`. This is the RUSLE2
+    overland-flow transect: divide → point of flow concentration.
+
+    Returns `[(row, col), ...]`, divide → channel head inclusive. Stops
+    early on a raster edge, an unresolved depression (direction 0), or a
+    loop (should not occur on a depression-filled DEM).
+    """
+    rows, cols = drainage.shape
+    r, c = start
+    path = [(r, c)]
+    visited = {(r, c)}
+    for _ in range(max_steps):
+        if len(path) > 1 and abs(int(flow_acc[r, c])) >= channel_threshold:
+            break
+        delta = _D8_DELTAS.get(abs(int(drainage[r, c])))
+        if delta is None:                       # 0 → depression / undetermined
+            break
+        nr, nc = r + delta[0], c + delta[1]
+        if not (0 <= nr < rows and 0 <= nc < cols):
+            break
+        if (nr, nc) in visited:                 # loop guard
+            break
+        r, c = nr, nc
+        path.append((r, c))
+        visited.add((r, c))
+    return path
+
+
+def _path_length_cells(path) -> float:
+    """Approximate path length in cell units (diagonal steps = sqrt(2))."""
+    total = 0.0
+    for (r0, c0), (r1, c1) in zip(path, path[1:]):
+        total += 1.41421356 if (r0 != r1 and c0 != c1) else 1.0
+    return total
+
+
+def _divide_mask(drainage):
+    """
+    Boolean mask of drainage divides — cells that no neighbour drains
+    into. Derived from the D8 `drainage` array, so it is robust: it does
+    not depend on exact floating-point accumulation values, which MFD
+    routing makes fractional.
+    """
+    absdir = np.abs(drainage).astype(np.int64)
+    rows, cols = drainage.shape
+    receives = np.zeros(drainage.shape, dtype=bool)
+    for code, (dr, dc) in _D8_DELTAS.items():
+        # Cells whose drainage == code feed the cell offset by (dr, dc).
+        src = absdir == code
+        tr = slice(max(0, dr), rows + min(0, dr))
+        tc = slice(max(0, dc), cols + min(0, dc))
+        sr = slice(max(0, -dr), rows + min(0, -dr))
+        sc = slice(max(0, -dc), cols + min(0, -dc))
+        receives[tr, tc] |= src[sr, sc]
+    return ~receives
+
+
+def _channel_heads(drainage, channel_mask):
+    """
+    Boolean mask of channel heads — channel cells (`channel_mask` True)
+    that no upstream channel cell drains into. Each is the top of one
+    draw; tracing D8 downslope from it gives a continuous draw line.
+    """
+    absdir = np.abs(drainage).astype(np.int64)
+    rows, cols = drainage.shape
+    fed_by_channel = np.zeros(drainage.shape, dtype=bool)
+    for code, (dr, dc) in _D8_DELTAS.items():
+        src = (absdir == code) & channel_mask
+        tr = slice(max(0, dr), rows + min(0, dr))
+        tc = slice(max(0, dc), cols + min(0, dc))
+        sr = slice(max(0, -dr), rows + min(0, -dr))
+        sc = slice(max(0, -dc), cols + min(0, -dc))
+        fed_by_channel[tr, tc] |= src[sr, sc]
+    return channel_mask & ~fed_by_channel
+
+
+def _rasterize_field(field_src: str, elev_tif: str):
+    """
+    Rasterize a field-boundary vector onto the DEM grid. Returns a bool
+    array (True = inside the field), aligned cell-for-cell with the
+    arrays r.watershed produces from `elev_tif`.
+
+    Uses gdal.Rasterize (not RasterizeLayer) so the field is reprojected
+    to the DEM's CRS — USGS DEMs are NAD83, field boundaries WGS84.
+    """
+    ref = gdal.Open(elev_tif)
+    mem = gdal.GetDriverByName("MEM").Create(
+        "", ref.RasterXSize, ref.RasterYSize, 1, gdal.GDT_Byte,
+    )
+    mem.SetGeoTransform(ref.GetGeoTransform())
+    mem.SetProjection(ref.GetProjection())
+    gdal.Rasterize(mem, field_src, burnValues=[1])
+    return mem.ReadAsArray().astype(bool)
+
+
+def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
+    """
+    Extract representative RUSLE2 hillslope profiles from `elev_tif`
     (elevation in meters, EPSG:4326). Returns one raw record per kept
-    flow line — caller (geoworker.mfd_flowlines) handles unit conversion,
+    hillslope — caller (geoworker.mfd_flowlines) handles unit conversion,
     DP simplification, shape classification, and per-feature clipping.
 
-    Pipeline:
-      1. r.fill.dir → filled DEM + D8 direction (byproduct).
-      2. r.watershed -m → MFD accumulation.
-      3. Top-N seed selection on the accumulation array (numpy NMS).
-      4. r.drain per seed → one LineString per seed (D8-routed).
-      5. r.water.outlet at each line's outlet → D8 catchment polygon.
-      6. Sample filled DEM at each line vertex → profile_vertices_m.
+    `elev_tif` is the buffered DEM (field bounding box + a margin), so the
+    upslope contributing area is captured. `field_shp`, when given, is the
+    field-boundary vector: half-basins are then ranked by their IN-FIELD
+    area, so off-field draws in the buffer margin don't crowd out the
+    field's own hillslopes. Without it, ranking falls back to total area.
 
-    Returns: list of dicts, each:
+    A flow line here is the overland-flow transect RUSLE2 needs: it runs
+    from a drainage divide (origin of overland flow) DOWN to where flow
+    concentrates into a channel. It is NOT the channel itself.
+
+    Pipeline:
+      1. r.fill.dir → depression-filled DEM.
+      2. r.watershed -m → MFD accumulation, D8 drainage, half-basins.
+      3. Half-basins partition the DEM into non-overlapping hillslope
+         units; the largest `max_lines` by IN-FIELD area are kept.
+      4. Per unit: among its divide cells (cells no neighbour drains into),
+         walk the D8 drainage downslope to the first channel cell
+         (|accumulation| >= channel_threshold). The longest such
+         divide→channel path is the unit's representative hillslope.
+      5. Sample the filled DEM along that path → profile_vertices_m.
+      6. Draw network: where >= draw_threshold cells concentrate, trace
+         the D8 channel from each head down to the outlet — one `draw`
+         record per draw (concentrated-flow channels where ephemeral-gully
+         erosion happens; complements the sheet-and-rill hillslopes).
+
+    Returns: list of dicts. Hillslope records and draw records share a
+    shape, distinguished by `kind`:
         {
-            "rank": int,                          # 1 = highest-acc outlet
-            "flow_accumulation_cells": int,
+            "kind": str,                          # "hillslope" or "draw"
+            "rank": int,                          # 1 = largest / longest
+            "flow_accumulation_cells": int,       # contributing area
             "line_wkt": str,                      # LineString WKT, EPSG:4326
-            "zone_wkt": str,                      # Polygon WKT, EPSG:4326
+            "zone_wkt": str,                      # Polygon WKT (draws: EMPTY)
             "profile_vertices_m": [(cum_length_m, elev_m), ...],
         }
 
@@ -374,6 +479,17 @@ def get_mfd_flowlines_raw(elev_tif: str, outdir: str, options=None) -> list:
     opts = options or {}
     max_lines = int(opts.get("max_lines", 5))
     min_flow_acc = int(opts.get("min_flow_accumulation_cells", 50))
+    # Accumulation at which overland flow is treated as concentrated into a
+    # channel — the downslope terminus of a RUSLE2 hillslope. Defaults to the
+    # r.watershed stream-definition threshold.
+    channel_threshold = int(opts.get("channel_threshold_cells", min_flow_acc))
+    # A draw is reported only where enough area concentrates to make it a
+    # real channel — higher than the rill-scale channel_threshold.
+    draw_threshold = int(opts.get("draw_threshold_cells", 300))
+    max_draws = int(opts.get("max_draws", 6))
+    # New channel a draw must add over already-kept draws to count as
+    # distinct — keeps near-duplicate traces of one draw from piling up.
+    draw_min_unique_m = float(opts.get("draw_min_unique_ft", 300)) * 0.3048
     min_line_length_m = float(opts.get("min_line_length_ft", 100)) * 0.3048
 
     location_path = initialize_grassdb()
@@ -387,6 +503,8 @@ def get_mfd_flowlines_raw(elev_tif: str, outdir: str, options=None) -> list:
         d8_name = f"d8_{uniq}"
         areas_name = f"fill_areas_{uniq}"
         flow_acc_name = f"flow_acc_{uniq}"
+        drainage_name = f"drainage_{uniq}"
+        half_basin_name = f"half_basin_{uniq}"
 
         gcore.parse_command(
             "r.external", input=elev_tif, band=1,
@@ -408,6 +526,8 @@ def get_mfd_flowlines_raw(elev_tif: str, outdir: str, options=None) -> list:
             flags="m",
             elevation=filled_name,
             accumulation=flow_acc_name,
+            drainage=drainage_name,
+            half_basin=half_basin_name,
             threshold=min_flow_acc,
             memory=300,
             overwrite=True,
@@ -423,139 +543,194 @@ def get_mfd_flowlines_raw(elev_tif: str, outdir: str, options=None) -> list:
         ew_res = float(region["ewres"])
         ns_res = float(region["nsres"])
 
-        # NMS radius in cells. The DEM resolution is in degrees in EPSG:4326 —
-        # convert min_line_length_m to degrees at the region's latitude.
-        # 1 deg lat ~= 111_111 m; lon scaled by cos(lat).
+        # Cell size in metres (DEM resolution is degrees in EPSG:4326).
         mean_lat = (y0 + float(region["s"])) / 2
         ns_res_m = ns_res * 111_111
         ew_res_m = ew_res * 111_111 * max(0.01, np.cos(np.deg2rad(mean_lat)))
         cell_size_m = (ns_res_m + ew_res_m) / 2
-        nms_radius_cells = max(1, int((min_line_length_m / 2) / cell_size_m))
 
-        seeds = _pick_seeds(
-            flow_acc, max_lines, min_flow_acc, nms_radius_cells,
+        drainage = np.asarray(
+            garray.array(mapname=drainage_name), dtype=np.float64,
         )
-        if not seeds:
+        drainage = np.nan_to_num(drainage, nan=0.0, posinf=0.0, neginf=0.0)
+        half_basin = np.asarray(
+            garray.array(mapname=half_basin_name), dtype=np.float64,
+        )
+        half_basin = np.nan_to_num(half_basin, nan=0.0, posinf=0.0, neginf=0.0)
+
+        divide_all = _divide_mask(drainage)
+        max_steps = 4 * (drainage.shape[0] + drainage.shape[1])
+
+        # Half-basins tile the buffered DEM into non-overlapping hillslope
+        # units. Rank them by IN-FIELD area, so off-field draws in the
+        # buffer margin don't crowd out the field's own hillslopes, then
+        # take one representative profile from each of the largest.
+        field_mask = None
+        if field_shp:
+            try:
+                fm = _rasterize_field(field_shp, elev_tif)
+                if fm.shape == half_basin.shape:
+                    field_mask = fm
+                else:
+                    print(f"field mask {fm.shape} != DEM {half_basin.shape}; "
+                          f"ranking half-basins by total area")
+            except Exception as exc:
+                print(f"field rasterize failed ({exc}); ranking by total area")
+
+        rank_sel = half_basin >= 1
+        if field_mask is not None:
+            rank_sel &= field_mask
+        unit_ids, unit_counts = np.unique(
+            half_basin[rank_sel].astype(np.int64), return_counts=True,
+        )
+        if unit_ids.size == 0:
             return []
+        ranked_units = [int(unit_ids[i]) for i in np.argsort(unit_counts)[::-1]]
 
         results = []
-        for rank, (row, col, acc_val) in enumerate(seeds, start=1):
-            seed_x = x0 + (col + 0.5) * ew_res
-            seed_y = y0 - (row + 0.5) * ns_res
+        rank = 0
+        for unit_id in ranked_units:
+            if rank >= max_lines:
+                break
+            unit_mask = half_basin == unit_id
 
-            line_name = f"line_{uniq}_{rank}"
+            # Representative divide→channel path within this hillslope
+            # unit. Score by IN-FIELD length (cells inside `field_mask`),
+            # not total length — a path that runs mostly through the buffer
+            # margin is not a hillslope of this field.
+            ridge_cells = np.argwhere(divide_all & unit_mask)
+            if ridge_cells.size == 0:
+                continue
+            # Cap the candidate walk on very large units.
+            if len(ridge_cells) > 3000:
+                ridge_cells = ridge_cells[:: len(ridge_cells) // 3000]
+
+            best_path = None
+            best_score = -1.0
+            for rr, cc in ridge_cells:
+                path = _trace_d8_path(
+                    drainage, flow_acc, (int(rr), int(cc)),
+                    channel_threshold, max_steps,
+                )
+                if len(path) < 2:
+                    continue
+                if field_mask is not None:
+                    in_field = sum(1 for (r, c) in path if field_mask[r, c])
+                    score = in_field * cell_size_m
+                else:
+                    score = _path_length_cells(path) * cell_size_m
+                if score > best_score:
+                    best_score = score
+                    best_path = path
+            if best_path is None or best_score < min_line_length_m:
+                continue
+
+            rank += 1
+            line_vertices = [
+                (x0 + (c + 0.5) * ew_res, y0 - (r + 0.5) * ns_res)
+                for (r, c) in best_path
+            ]
+
+            # Vectorize this hillslope unit → the zone polygon.
+            mask_name = f"hbmask_{uniq}_{rank}"
+            zone_vec_name = f"zone_vec_{uniq}_{rank}"
+            zone_wkt = "POLYGON EMPTY"
             try:
                 gcore.parse_command(
-                    "r.drain",
-                    input=filled_name,
-                    direction=d8_name,
-                    start_coordinates=f"{seed_x},{seed_y}",
-                    output=line_name,
-                    overwrite=True,
-                )
-            except Exception as exc:
-                print(f"r.drain failed for seed {rank}: {exc}")
-                continue
-
-            line_vec_name = f"line_vec_{uniq}_{rank}"
-            try:
-                gcore.parse_command(
-                    "r.thin",
-                    input=line_name,
-                    output=f"{line_name}_thin",
+                    "r.mapcalc",
+                    expression=(
+                        f"{mask_name} = "
+                        f"if({half_basin_name} == {unit_id}, 1, null())"
+                    ),
                     overwrite=True,
                 )
                 gcore.parse_command(
-                    "r.to.vect",
-                    input=f"{line_name}_thin",
-                    output=line_vec_name,
-                    type="line",
-                    overwrite=True,
+                    "r.to.vect", input=mask_name, output=zone_vec_name,
+                    type="area", overwrite=True,
                 )
-            except Exception as exc:
-                print(f"line vectorize failed for seed {rank}: {exc}")
-                continue
-
-            line_geo_path = os.path.join(outdir, f"{line_vec_name}.geojson")
-            if os.path.exists(line_geo_path):
-                os.remove(line_geo_path)
-            try:
+                zone_geo_path = os.path.join(
+                    outdir, f"{zone_vec_name}.geojson",
+                )
+                if os.path.exists(zone_geo_path):
+                    os.remove(zone_geo_path)
                 gcore.parse_command(
-                    "v.out.ogr",
-                    input=line_vec_name,
-                    output=line_geo_path,
-                    format="GeoJSON",
-                    overwrite=True,
+                    "v.out.ogr", input=zone_vec_name, output=zone_geo_path,
+                    format="GeoJSON", overwrite=True,
                 )
+                with open(zone_geo_path) as f:
+                    zone_wkt = _largest_polygon_wkt(json.load(f))
             except Exception as exc:
-                print(f"line export failed for seed {rank}: {exc}")
-                continue
-
-            with open(line_geo_path) as f:
-                line_geo = json.load(f)
-            line_vertices = _extract_single_linestring(line_geo)
-            if line_vertices is None:
-                print(f"line {rank} dropped: not a single LineString")
-                continue
-            if len(line_vertices) < 2:
-                continue
-
-            outlet_x, outlet_y = line_vertices[-1]
-            catch_name = f"catch_{uniq}_{rank}"
-            try:
-                gcore.parse_command(
-                    "r.water.outlet",
-                    input=d8_name,
-                    output=catch_name,
-                    coordinates=f"{outlet_x},{outlet_y}",
-                    overwrite=True,
-                )
-            except Exception as exc:
-                print(f"r.water.outlet failed for line {rank}: {exc}")
-                continue
-
-            catch_vec_name = f"catch_vec_{uniq}_{rank}"
-            try:
-                gcore.parse_command(
-                    "r.to.vect",
-                    input=catch_name,
-                    output=catch_vec_name,
-                    type="area",
-                    overwrite=True,
-                )
-            except Exception as exc:
-                print(f"catchment vectorize failed for line {rank}: {exc}")
-                continue
-
-            catch_geo_path = os.path.join(outdir, f"{catch_vec_name}.geojson")
-            if os.path.exists(catch_geo_path):
-                os.remove(catch_geo_path)
-            try:
-                gcore.parse_command(
-                    "v.out.ogr",
-                    input=catch_vec_name,
-                    output=catch_geo_path,
-                    format="GeoJSON",
-                    overwrite=True,
-                )
-            except Exception as exc:
-                print(f"catchment export failed for line {rank}: {exc}")
-                continue
-
-            with open(catch_geo_path) as f:
-                catch_geo = json.load(f)
-            zone_wkt = _largest_polygon_wkt(catch_geo)
+                print(f"zone vectorize failed for unit {unit_id}: {exc}")
 
             profile_m = _build_profile(
                 line_vertices, filled_arr, x0, y0, ew_res, ns_res,
             )
 
+            # Contributing area is read at the channel head — the foot of
+            # the hillslope, where overland flow concentrates.
+            head_r, head_c = best_path[-1]
+            head_acc = int(abs(flow_acc[head_r, head_c]))
+
             results.append({
+                "kind": "hillslope",
                 "rank": rank,
-                "flow_accumulation_cells": int(acc_val),
+                "flow_accumulation_cells": head_acc,
                 "line_wkt": _linestring_wkt(line_vertices),
                 "zone_wkt": zone_wkt,
                 "profile_vertices_m": profile_m,
+            })
+
+        # ----- draw network: concentrated-flow channels -----------------
+        # Where >= draw_threshold cells concentrate, overland flow becomes a
+        # draw — the channels where ephemeral-gully erosion happens. Trace
+        # each draw as ONE continuous line from its head down to the field
+        # outlet (a `draw` record; complements the hillslopes). Lower stems
+        # of separate draws overlap where tributaries merge — by design,
+        # each draw reads as a whole line.
+        channel_mask = np.abs(flow_acc) >= draw_threshold
+        traced = []
+        for hr, hc in np.argwhere(_channel_heads(drainage, channel_mask)):
+            path = _trace_d8_path(
+                drainage, flow_acc, (int(hr), int(hc)),
+                channel_threshold=10 ** 9, max_steps=max_steps,
+            )
+            if len(path) >= 2:
+                traced.append(path)
+
+        # Many heads trace near-identical paths (they converge fast). Keep
+        # the longest, then each next draw only if it adds a real run of
+        # NEW channel — yielding the main draw plus distinct tributaries.
+        traced.sort(key=len, reverse=True)
+        min_unique = max(2, int(draw_min_unique_m / cell_size_m))
+        corridor = 3        # cells: draws within this of a kept draw are it
+        covered = set()
+        draw_paths = []
+        for path in traced:
+            if sum(cell not in covered for cell in path) >= min_unique:
+                draw_paths.append(path)
+                # Mark a corridor around the kept draw so a near-parallel
+                # trace of the same draw is not also kept.
+                for pr, pc in path:
+                    for dr in range(-corridor, corridor + 1):
+                        for dc in range(-corridor, corridor + 1):
+                            covered.add((pr + dr, pc + dc))
+            if len(draw_paths) >= max_draws:
+                break
+
+        for i, path in enumerate(draw_paths, start=1):
+            acc_max = max(int(abs(flow_acc[r, c])) for (r, c) in path)
+            verts = [
+                (x0 + (c + 0.5) * ew_res, y0 - (r + 0.5) * ns_res)
+                for (r, c) in path
+            ]
+            results.append({
+                "kind": "draw",
+                "rank": i,
+                "flow_accumulation_cells": acc_max,
+                "line_wkt": _linestring_wkt(verts),
+                "zone_wkt": "POLYGON EMPTY",
+                "profile_vertices_m": _build_profile(
+                    verts, filled_arr, x0, y0, ew_res, ns_res),
             })
 
         return results
