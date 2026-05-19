@@ -437,11 +437,13 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
     hillslope — caller (geoworker.mfd_flowlines) handles unit conversion,
     DP simplification, shape classification, and per-feature clipping.
 
-    `elev_tif` is the buffered DEM (field bounding box + a margin), so the
-    upslope contributing area is captured. `field_shp`, when given, is the
-    field-boundary vector: half-basins are then ranked by their IN-FIELD
-    area, so off-field draws in the buffer margin don't crowd out the
-    field's own hillslopes. Without it, ranking falls back to total area.
+    `elev_tif` is the flow-computation DEM — the user-selected
+    watershed/analysis polygon's bbox, or the field bounding box + a margin
+    when no analysis area was selected — so the upslope contributing area
+    is captured. `field_shp`, when given, is the field-boundary vector:
+    half-basins are then ranked by their IN-FIELD area, so off-field draws
+    in the surrounding margin don't crowd out the field's own hillslopes.
+    Without it, ranking falls back to total area.
 
     A flow line here is the overland-flow transect RUSLE2 needs: it runs
     from a drainage divide (origin of overland flow) DOWN to where flow
