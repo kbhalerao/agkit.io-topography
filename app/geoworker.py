@@ -573,50 +573,57 @@ class LambdaGISProcessor:
         result = self.gdal_warp_clip(geo_slope_raster, self.cache["field_shp"])
         return self.handle_posting(new_file=result, color_map="slope", payload=payload)
 
-    def _post_built_raster(self, file_path, payload, extent=None):
-        """Post an already-built raster artifact to every output slot as-is.
-
-        Unlike `handle_posting`, this does no colorize step — for handlers
-        that produce their own finished PNG (e.g. the blended topo layer).
-        """
-        responses = []
-        for output in payload["post"]["output"]:
-            if self.IN_TEST:
-                print(f"IN_TEST: skipping post for {output.get('parameter')}")
-                responses.append((payload["metadata"]["function_name"], file_path))
-                continue
-            resp = post_raster(
-                post_url=output["post_url"],
-                filepath=file_path,
-                parameter=output.get("parameter", payload["post"].get("parameter", "")),
-                layer=output.get("layer", payload["post"].get("layer", "")),
-                filename=output.get("filename") or os.path.basename(file_path),
-                extent=extent,
-            )
-            responses.append(
-                "PNG file posted successfully."
-                if resp.ok
-                else f"Error posting PNG file, status: {resp.status_code}.",
-            )
-        return responses
-
     def topo_blended_public_10m(self, payload):
-        """Blended topography basemap — a multidirectional hillshade
-        composited over a color-relief elevation map (LabCore's "USGS 10m
-        topography layer"). Single RGBA PNG output, no data tif.
+        """Default topography artifacts — a clipped single-band DEM TIF
+        (the elevation data we use for on-demand calculations) and a
+        blended-hillshade PNG (multidirectional hillshade composited over
+        a color-relief elevation map; LabCore's "USGS 10m topography
+        layer").
 
-        The blended PNG covers the clipped elevation's extent; `extent` is
-        derived from that source tif and sent on the postback so Django can
-        place the georef-less PNG precisely.
+        Both share the clipped DEM's extent; `extent` is derived from the
+        source tif and sent on every postback so Django can place the
+        georef-less PNG precisely.
         """
         self.build_common_cache(payload)
         elev = self.gdal_warp_clip(self.cache["dem_raster"], self.cache["field_shp"])
-        blended_png = GeoColorize(
-            folder=self.tmpdirname.rstrip("/"),
-        ).blended_topo(elev)
-        return self._post_built_raster(
-            blended_png, payload, extent=_raster_bounds_4326(elev),
-        )
+        extent = _raster_bounds_4326(elev)
+        blended_png = None
+
+        responses = []
+        for output in payload["post"]["output"]:
+            ext = (output.get("extension") or "").lower()
+            if ext == "tif":
+                outfile = elev
+                label = "TIF"
+            elif ext == "png":
+                if blended_png is None:
+                    blended_png = GeoColorize(
+                        folder=self.tmpdirname.rstrip("/"),
+                    ).blended_topo(elev)
+                outfile = blended_png
+                label = "PNG"
+            else:
+                raise ValueError(f"Unknown output extension: {ext!r}")
+
+            if self.IN_TEST:
+                print(f"IN_TEST: skipping post for {label}")
+                responses.append((payload["metadata"]["function_name"], outfile))
+                continue
+
+            resp = post_raster(
+                post_url=output["post_url"],
+                filepath=outfile,
+                parameter=output.get("parameter", payload["post"].get("parameter", "")),
+                layer=output.get("layer", payload["post"].get("layer", "")),
+                filename=output.get("filename") or os.path.basename(outfile),
+                extent=extent,
+            )
+            responses.append(
+                f"{label} file posted successfully."
+                if resp.ok
+                else f"Error posting {label} file, status: {resp.status_code}.",
+            )
+        return responses
 
     def watershed_drainage(self, payload):
         self.watershed_common(payload)
