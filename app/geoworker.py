@@ -493,6 +493,7 @@ class LambdaGISProcessor:
         # from it, so both share these bounds. Sent on every postback so
         # Django can place the (georef-less) png at its true extent.
         extent = _raster_bounds_4326(new_file)
+        request_signature = payload.get("metadata", {}).get("request_signature")
         responses = []
         for output in payload["post"]["output"]:
             ext = (output.get("extension") or "").lower()
@@ -517,6 +518,7 @@ class LambdaGISProcessor:
                 layer=output.get("layer", payload["post"].get("layer", "")),
                 filename=output.get("filename") or os.path.basename(outfile),
                 extent=extent,
+                request_signature=request_signature,
             )
             if resp.ok:
                 responses.append(f"{label} file posted successfully.")
@@ -588,6 +590,7 @@ class LambdaGISProcessor:
         elev = self.gdal_warp_clip(self.cache["dem_raster"], self.cache["field_shp"])
         extent = _raster_bounds_4326(elev)
         blended_png = None
+        request_signature = payload.get("metadata", {}).get("request_signature")
 
         responses = []
         for output in payload["post"]["output"]:
@@ -617,6 +620,7 @@ class LambdaGISProcessor:
                 layer=output.get("layer", payload["post"].get("layer", "")),
                 filename=output.get("filename") or os.path.basename(outfile),
                 extent=extent,
+                request_signature=request_signature,
             )
             responses.append(
                 f"{label} file posted successfully."
@@ -754,6 +758,7 @@ class LambdaGISProcessor:
 
     def _post_vector_outputs(self, file_path: str, payload) -> list:
         """Post a vector file to every `output` slot in `payload['post']`."""
+        request_signature = payload.get("metadata", {}).get("request_signature")
         responses = []
         for output in payload["post"]["output"]:
             if self.IN_TEST:
@@ -766,6 +771,7 @@ class LambdaGISProcessor:
                 parameter=output.get("parameter", payload["post"].get("parameter", "")),
                 layer=output.get("layer", payload["post"].get("layer", "")),
                 filename=output.get("filename") or os.path.basename(file_path),
+                request_signature=request_signature,
             )
             responses.append(
                 "GeoJSON posted successfully."

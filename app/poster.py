@@ -40,6 +40,7 @@ def post_raster(
     layer: str,
     filename: Optional[str] = None,
     extent: Optional[Sequence[float]] = None,
+    request_signature: Optional[str] = None,
 ) -> requests.Response:
     """POST a raster artifact to its signed Django postback URL.
 
@@ -47,6 +48,11 @@ def post_raster(
     ``[west, south, east, north]`` in EPSG:4326. PNG carries no georef, so
     Django stores this on the layer and the frontend overlays the image at
     these exact bounds instead of stretching it to the field bbox.
+
+    `request_signature`, when given, is the sha1 the Django service layer
+    minted at request time (it identifies the bundle inputs). Echoed back
+    verbatim so Django can stamp it on the resulting layer row — that's how
+    the freshness check detects layers from a prior bundle version.
     """
     name = filename or filepath.rsplit("/", 1)[-1]
     with open(filepath, "rb") as fp:
@@ -54,6 +60,8 @@ def post_raster(
         data = {"parameter": parameter, "layer": layer or ""}
         if extent is not None:
             data["extent"] = json.dumps([float(v) for v in extent])
+        if request_signature:
+            data["request_signature"] = request_signature
         response = requests.post(
             post_url,
             files=files,
