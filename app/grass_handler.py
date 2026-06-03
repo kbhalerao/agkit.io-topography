@@ -61,13 +61,17 @@ def _resolve_gisbase() -> str:
     return "/usr/local/grass"
 
 
-def initialize_grassdb():
+def initialize_grassdb(epsg="4326"):
     """
-    Create a fresh GRASS location + PERMANENT mapset under `/tmp/grassdata`,
-    initialize the Python session, and return the location path so the
-    caller can tear it down on exit.
+    Create a fresh GRASS location + PERMANENT mapset under `/tmp/grassdata`
+    in CRS ``epsg`` (default geographic 4326), initialize the Python session,
+    and return the location path so the caller can tear it down on exit.
+
+    Flow jobs (``get_watershed_maps``) pass a projected metric CRS so
+    r.watershed's slope/length/L/LS are computed over real metres; contour /
+    flowline callers keep the 4326 default.
     """
-    myepsg = "4326"
+    myepsg = str(epsg)
     gisbase = _resolve_gisbase()
 
     os.environ["GISBASE"] = gisbase
@@ -152,26 +156,61 @@ def get_contour_lines(elev_tif: str, outdir: str, step_ft: float = 2) -> str:
         shutil.rmtree(location_path, ignore_errors=True)
 
 
-def get_watershed_maps(elev_tif: str, outdir: str) -> dict:
+# RUSLE flow CRS: NAD83 Conus Albers (equal-area, metres). r.watershed's
+# slope/length/L/LS are computed over the region resolution as if it were the
+# metric cell size — in EPSG:4326 that resolution is in DEGREES, so LS pegs at
+# r.watershed's internal cap and L collapses to ~0. Running in a projected
+# metric CRS makes the RUSLE factors physical.
+_FLOW_EPSG = 5070
+_FLOW_RES_M = 10.0
+
+
+def _reproject_for_flow(elev_tif: str, outdir: str,
+                        epsg: int = _FLOW_EPSG,
+                        res_m: float = _FLOW_RES_M) -> str:
+    """Warp a 4326 DEM into the projected flow CRS on a square metric grid,
+    resampling with cubicspline (smooths the quantized/anisotropic source
+    without the nearest-neighbour stair-stepping). The source nodata sentinel
+    is carried through so the kernel does not reach across the nodata margin."""
+    src = gdal.Open(elev_tif)
+    nd = src.GetRasterBand(1).GetNoDataValue()
+    src = None
+    out = os.path.join(outdir, f"flow_dem_epsg{epsg}.tif")
+    gdal.Warp(
+        out, elev_tif, dstSRS=f"EPSG:{epsg}", resampleAlg="cubicspline",
+        xRes=res_m, yRes=res_m, srcNodata=nd, dstNodata=nd, format="GTiff",
+    )
+    return out
+
+
+def get_watershed_maps(elev_tif: str, outdir: str,
+                       epsg: int = _FLOW_EPSG) -> dict:
     """
     Run r.watershed against `elev_tif` and write the configured
     raster outputs into `outdir`. Returns a dict mapping output name
     (e.g. ``"length_slope"``) → tif path.
 
+    `elev_tif` is a 4326 DEM; it is reprojected to a projected metric CRS
+    (``epsg``, default Albers 5070) with cubicspline before the watershed
+    runs, so the RUSLE L/LS factors are physical (see `_reproject_for_flow`
+    and `initialize_grassdb`). The exported rasters are in that CRS; the
+    geoworker warps them back to 4326 on postback.
+
     Always exports drainage, stream, spi, tci, length_slope (L), and
     slope_steepness (LS). Callers that only need a subset can index
     into the returned dict.
     """
-    location_path = initialize_grassdb()
+    proj_dem = _reproject_for_flow(elev_tif, outdir, epsg=epsg)
+    location_path = initialize_grassdb(epsg=epsg)
     from grass.script import core as gcore
     try:
-        _basename, ext = os.path.splitext(os.path.basename(elev_tif))
+        _basename, ext = os.path.splitext(os.path.basename(proj_dem))
         uniq = uuid.uuid4().hex
         results: dict[str, str] = {}
 
         gcore.parse_command(
             "r.external",
-            input=elev_tif, band=1,
+            input=proj_dem, band=1,
             output=f"elev{uniq}",
             overwrite=True, flags="o",
         )
