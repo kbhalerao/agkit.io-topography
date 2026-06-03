@@ -357,7 +357,17 @@ class LambdaGISProcessor:
         return temp.name
 
     def gdal_translate_elev(self, dem_raster):
-        """Project EPSG:4326 → EPSG:5072 (NAD83 Albers, meters)."""
+        """Project EPSG:4326 → NAD83 Conus Albers (EPSG:5070, meters) on a
+        10 m square grid, resampling with cubicspline.
+
+        At mid-CONUS latitudes a 1/3 arc-second cell is markedly non-square
+        (~10 m N-S × ~7-8 m E-W) and the elevation is quantized. Reprojecting
+        with nearest-neighbour stair-steps whole rows/cols; the slope
+        derivative then amplifies those steps into the periodic striping seen
+        on flat terrain. cubicspline onto a 10 m square grid removes the
+        anisotropy and the stair-stepping while preserving real slope signal.
+        srcNodata=0 keeps the kernel from reaching across the nodata margin.
+        """
         src_srs = osr.SpatialReference()
         if src_srs.ImportFromProj4("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs") != 0:
             raise RuntimeError("could not import EPSG:4326")
@@ -366,18 +376,26 @@ class LambdaGISProcessor:
             "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 +y_0=0 "
             "+ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
         ) != 0:
-            raise RuntimeError("could not import EPSG:5072")
+            raise RuntimeError("could not import EPSG:5070")
 
         with NamedTemporaryFile(suffix=".tif", delete=False) as temp:
             gdal.Warp(
                 temp.name, dem_raster,
                 srcSRS=src_srs, dstSRS=dst_srs,
                 srcNodata=0, dstNodata=0, format="GTiff",
+                resampleAlg="cubicspline", xRes=10, yRes=10,
             )
         return temp.name
 
-    def gdal_warp_to_geo(self, raster):
-        """Warp `raster` back to EPSG:4326 (geographic)."""
+    def gdal_warp_to_geo(self, raster, ref_grid=None):
+        """Warp `raster` back to EPSG:4326 (geographic) with cubicspline.
+
+        `ref_grid`, when given, is a 4326 raster (the source DEM) whose exact
+        grid the output is pinned to — bounds + width/height — so the back-warp
+        does NOT coarsen onto a GDAL-chosen grid (coarsening was the second
+        half of the slope-striping; see `gdal_translate_elev`). Without it the
+        output grid is GDAL's default.
+        """
         ds = gdal.Open(raster)
         try:
             src_srs = osr.SpatialReference(wkt=ds.GetProjection())
@@ -386,14 +404,29 @@ class LambdaGISProcessor:
         dst_srs = osr.SpatialReference()
         if dst_srs.ImportFromProj4("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs") != 0:
             raise RuntimeError("could not import EPSG:4326")
+
+        warp_kwargs = dict(
+            srcNodata=0, dstNodata=0,
+            format="GTiff",
+            srcSRS=src_srs, dstSRS=dst_srs,
+            resampleAlg="cubicspline",
+            copyMetadata=True,
+        )
+        if ref_grid is not None:
+            rds = gdal.Open(ref_grid)
+            try:
+                gt = rds.GetGeoTransform()
+                nx, ny = rds.RasterXSize, rds.RasterYSize
+            finally:
+                rds = None
+            warp_kwargs["outputBounds"] = [
+                gt[0], gt[3] + ny * gt[5], gt[0] + nx * gt[1], gt[3],
+            ]
+            warp_kwargs["width"] = nx
+            warp_kwargs["height"] = ny
+
         with NamedTemporaryFile(suffix=".tif", delete=False) as temp:
-            gdal.Warp(
-                temp.name, raster,
-                srcNodata=0, dstNodata=0,
-                format="GTiff",
-                srcSRS=src_srs, dstSRS=dst_srs,
-                copyMetadata=True,
-            )
+            gdal.Warp(temp.name, raster, **warp_kwargs)
         return temp.name
 
     def gdal_warp_clip(self, raster_to_clip, cutline_shapefile):
@@ -571,7 +604,11 @@ class LambdaGISProcessor:
         self.build_common_cache(payload)
         proj_buffered_dem = self.gdal_translate_elev(self.cache["clipped_raster"])
         slope_raster = self.slope(proj_buffered_dem, xyunit="m", zunit="m")
-        geo_slope_raster = self.gdal_warp_to_geo(slope_raster)
+        # Pin the back-warp to the source DEM's 4326 grid so it is not
+        # coarsened — the second half of the de-striping fix.
+        geo_slope_raster = self.gdal_warp_to_geo(
+            slope_raster, ref_grid=self.cache["clipped_raster"],
+        )
         result = self.gdal_warp_clip(geo_slope_raster, self.cache["field_shp"])
         return self.handle_posting(new_file=result, color_map="slope", payload=payload)
 
