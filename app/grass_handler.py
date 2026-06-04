@@ -61,7 +61,7 @@ def _resolve_gisbase() -> str:
     return "/usr/local/grass"
 
 
-def initialize_grassdb(epsg="4326"):
+def initialize_grassdb(epsg: "int | str" = "4326"):
     """
     Create a fresh GRASS location + PERMANENT mapset under `/tmp/grassdata`
     in CRS ``epsg`` (default geographic 4326), initialize the Python session,
@@ -264,8 +264,35 @@ _ALBERS_PROJ4 = (
 )
 
 
-def _largest_polygon_wkt(geojson: dict) -> str:
-    """Return the WKT of the largest Polygon/MultiPolygon in a FeatureCollection."""
+def _albers_to_lonlat():
+    """CoordinateTransformation EPSG:5070 (Albers metres) → EPSG:4326. Built
+    from proj4 strings so both sides use traditional lon,lat axis order (GDAL
+    3's authority-compliant default would otherwise return lat,lon for 4326).
+    The flow pipeline routes in 5070; geometry is transformed back to 4326
+    here before it leaves `get_mfd_flowlines_raw`."""
+    src = osr.SpatialReference()
+    src.ImportFromProj4(_ALBERS_PROJ4)
+    dst = osr.SpatialReference()
+    dst.ImportFromProj4(_LON_LAT_PROJ4)
+    return osr.CoordinateTransformation(src, dst)
+
+
+def _vertices_to_lonlat(vertices, ct):
+    """Transform [(x_m, y_m), ...] in Albers metres to [(lon, lat), ...]."""
+    out = []
+    for x, y in vertices:
+        lon, lat, _ = ct.TransformPoint(x, y)
+        out.append((lon, lat))
+    return out
+
+
+def _largest_polygon_wkt(geojson: dict, transform=None) -> str:
+    """Return the WKT of the largest Polygon/MultiPolygon in a FeatureCollection.
+
+    `transform`, when given (an osr.CoordinateTransformation), is applied to
+    the chosen geometry before export — used to bring a polygon emitted by
+    v.out.ogr in the projected flow CRS back to EPSG:4326. Area is compared in
+    the source CRS, which is fine: the transform is monotonic in area here."""
     best = None
     best_area = -1.0
     for feat in geojson.get("features", []):
@@ -279,6 +306,8 @@ def _largest_polygon_wkt(geojson: dict) -> str:
             best_area = area
     if best is None:
         return "POLYGON EMPTY"
+    if transform is not None:
+        best.Transform(transform)
     return best.ExportToWkt()
 
 
@@ -287,20 +316,28 @@ def _linestring_wkt(vertices) -> str:
     return f"LINESTRING ({coord_str})"
 
 
-def _build_profile(line_vertices, filled_arr, x0, y0, ew_res, ns_res) -> list:
+def _build_profile(line_vertices, filled_arr, x0, y0, ew_res, ns_res,
+                   planar=False) -> list:
     """
     Sample the (filled) DEM at each line vertex and build the
-    `(cum_length_m, elev_m)` sequence. Distances are computed in EPSG:5072
-    (Albers, meters) — line vertices are in EPSG:4326.
+    `(cum_length_m, elev_m)` sequence.
+
+    `planar=True` (the flow pipeline): vertices and the (x0, y0, ew_res,
+    ns_res) grid are already in the projected metric CRS (EPSG:5070), so the
+    grid is sampled directly and distances are plain Euclidean on the input
+    coordinates. `planar=False` (legacy): vertices are EPSG:4326 and are
+    transformed to Albers metres to measure distance.
     """
     if not line_vertices:
         return []
 
-    src_srs = osr.SpatialReference()
-    src_srs.ImportFromProj4(_LON_LAT_PROJ4)
-    planar_srs = osr.SpatialReference()
-    planar_srs.ImportFromProj4(_ALBERS_PROJ4)
-    to_planar = osr.CoordinateTransformation(src_srs, planar_srs)
+    to_planar = None
+    if not planar:
+        src_srs = osr.SpatialReference()
+        src_srs.ImportFromProj4(_LON_LAT_PROJ4)
+        planar_srs = osr.SpatialReference()
+        planar_srs.ImportFromProj4(_ALBERS_PROJ4)
+        to_planar = osr.CoordinateTransformation(src_srs, planar_srs)
 
     profile = []
     cum_length_m = 0.0
@@ -316,7 +353,10 @@ def _build_profile(line_vertices, filled_arr, x0, y0, ew_res, ns_res) -> list:
         if not np.isfinite(elev_m):
             continue
 
-        px, py, _ = to_planar.TransformPoint(x, y)
+        if planar:
+            px, py = x, y
+        else:
+            px, py, _ = to_planar.TransformPoint(x, y)
         if prev_planar is not None:
             dx = px - prev_planar[0]
             dy = py - prev_planar[1]
@@ -442,6 +482,12 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
     hillslope — caller (geoworker.mfd_flowlines) handles unit conversion,
     DP simplification, shape classification, and per-feature clipping.
 
+    Routing runs in a projected metric CRS (Albers 5070, 10 m square cells):
+    the input 4326 DEM is reprojected once with cubicspline, all D8/MFD
+    analysis happens there so flow directions and path lengths are physical,
+    and the line/zone geometry is transformed back to EPSG:4326 before return
+    (`line_wkt`, `zone_wkt`). `profile_vertices_m` stays in metres.
+
     `elev_tif` is the flow-computation DEM — the user-selected
     watershed/analysis polygon's bbox, or the field bounding box + a margin
     when no analysis area was selected — so the upslope contributing area
@@ -499,9 +545,18 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
     draw_min_unique_m = float(opts.get("draw_min_unique_ft", 300)) * 0.3048
     min_line_length_m = float(opts.get("min_line_length_ft", 100)) * 0.3048
 
-    location_path = initialize_grassdb()
+    # Route in a projected metric CRS (Albers 5070, 10 m square cells). In
+    # native 4326 the cells are anisotropic at CONUS latitudes, which biases
+    # r.watershed's D8 flow direction and makes path lengths degree-scaled
+    # (see _reproject_for_flow / get_watershed_maps). The DEM is reprojected
+    # once here; geometry is transformed back to 4326 before it leaves this
+    # function (line/zone WKT), while profile distances stay in metres.
+    proj_dem = _reproject_for_flow(elev_tif, outdir)
+    location_path = initialize_grassdb(epsg=_FLOW_EPSG)
     from grass.script import core as gcore
     import grass.script.array as garray
+
+    to_geo = _albers_to_lonlat()
 
     try:
         uniq = uuid.uuid4().hex
@@ -514,7 +569,7 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
         half_basin_name = f"half_basin_{uniq}"
 
         gcore.parse_command(
-            "r.external", input=elev_tif, band=1,
+            "r.external", input=proj_dem, band=1,
             output=elev_name, overwrite=True, flags="o",
         )
         gcore.parse_command("g.region", raster=elev_name)
@@ -550,11 +605,9 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
         ew_res = float(region["ewres"])
         ns_res = float(region["nsres"])
 
-        # Cell size in metres (DEM resolution is degrees in EPSG:4326).
-        mean_lat = (y0 + float(region["s"])) / 2
-        ns_res_m = ns_res * 111_111
-        ew_res_m = ew_res * 111_111 * max(0.01, np.cos(np.deg2rad(mean_lat)))
-        cell_size_m = (ns_res_m + ew_res_m) / 2
+        # Region is in projected metres now (Albers 5070, square cells), so
+        # the resolution IS the metric cell size — no degree→metre scaling.
+        cell_size_m = (ew_res + ns_res) / 2
 
         drainage = np.asarray(
             garray.array(mapname=drainage_name), dtype=np.float64,
@@ -575,7 +628,7 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
         field_mask = None
         if field_shp:
             try:
-                fm = _rasterize_field(field_shp, elev_tif)
+                fm = _rasterize_field(field_shp, proj_dem)
                 if fm.shape == half_basin.shape:
                     field_mask = fm
                 else:
@@ -633,10 +686,13 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
                 continue
 
             rank += 1
-            line_vertices = [
+            # Cell centres in projected metres (used for profile sampling and
+            # metric distance); the 4326 copy is what travels in the WKT.
+            planar_vertices = [
                 (x0 + (c + 0.5) * ew_res, y0 - (r + 0.5) * ns_res)
                 for (r, c) in best_path
             ]
+            line_vertices = _vertices_to_lonlat(planar_vertices, to_geo)
 
             # Vectorize this hillslope unit → the zone polygon.
             mask_name = f"hbmask_{uniq}_{rank}"
@@ -665,12 +721,13 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
                     format="GeoJSON", overwrite=True,
                 )
                 with open(zone_geo_path) as f:
-                    zone_wkt = _largest_polygon_wkt(json.load(f))
+                    zone_wkt = _largest_polygon_wkt(json.load(f), transform=to_geo)
             except Exception as exc:
                 print(f"zone vectorize failed for unit {unit_id}: {exc}")
 
             profile_m = _build_profile(
-                line_vertices, filled_arr, x0, y0, ew_res, ns_res,
+                planar_vertices, filled_arr, x0, y0, ew_res, ns_res,
+                planar=True,
             )
 
             # Contributing area is read at the channel head — the foot of
@@ -726,18 +783,20 @@ def get_mfd_flowlines_raw(elev_tif, outdir, options=None, field_shp=None):
 
         for i, path in enumerate(draw_paths, start=1):
             acc_max = max(int(abs(flow_acc[r, c])) for (r, c) in path)
-            verts = [
+            planar_verts = [
                 (x0 + (c + 0.5) * ew_res, y0 - (r + 0.5) * ns_res)
                 for (r, c) in path
             ]
+            geo_verts = _vertices_to_lonlat(planar_verts, to_geo)
             results.append({
                 "kind": "draw",
                 "rank": i,
                 "flow_accumulation_cells": acc_max,
-                "line_wkt": _linestring_wkt(verts),
+                "line_wkt": _linestring_wkt(geo_verts),
                 "zone_wkt": "POLYGON EMPTY",
                 "profile_vertices_m": _build_profile(
-                    verts, filled_arr, x0, y0, ew_res, ns_res),
+                    planar_verts, filled_arr, x0, y0, ew_res, ns_res,
+                    planar=True),
             })
 
         return results

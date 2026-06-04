@@ -42,7 +42,14 @@ try:
 except Exception:
     _GRASS = False
 
+try:
+    from app.grass_handler import get_mfd_flowlines_raw, _FLOW_EPSG, _FLOW_RES_M
+    _FLOW = True
+except Exception:
+    _FLOW = False
+
 _DEM = "tests/_synth_dem_4326.tif"
+_FLOW_DEM = "tests/_synth_flow_dem_4326.tif"
 
 
 def _ensure_dem(path=_DEM):
@@ -76,8 +83,41 @@ def _ensure_dem(path=_DEM):
     return path
 
 
+def _ensure_flow_dem(path=_FLOW_DEM):
+    """Write a synthetic DEM that drains predominantly due EAST, in EPSG:4326
+    at a mid-CONUS latitude. East is the worst case for the 4326 anisotropy
+    bug: an E-W cell spans ~7.8 m of ground at lat 41 but r.watershed treats
+    it as one unit, so a horizontal flow path's segment lengths come out at
+    ~7.8 m instead of the true 10 m. Reprojecting to a metric CRS makes every
+    orthogonal step a true 10 m. A faint southward tilt + tiny noise keep the
+    D8 routing deterministic without diluting the dominant E-W steps."""
+    if os.path.exists(path):
+        return path
+    nx, ny = 180, 120
+    lon0, lat0 = -90.0, 41.0
+    px = 9.2593e-5  # ~10 m N-S; ~7.8 m E-W ground at lat 41
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
+    # Strong eastward fall, faint southward fall, low-amplitude texture so
+    # r.fill.dir/r.watershed have no ties but flow stays dominantly E.
+    elev = (350.0 - 0.80 * xx - 0.05 * yy
+            + 0.05 * np.sin(xx * 1.7) * np.sin(yy * 1.9)).astype(np.float32)
+
+    drv = gdal.GetDriverByName("GTiff")
+    ds = drv.Create(path, nx, ny, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform([lon0, px, 0, lat0, 0, -px])
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    ds.SetProjection(srs.ExportToWkt())
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(0)
+    band.WriteArray(elev)
+    ds.FlushCache()
+    ds = None
+    return path
+
+
 def tearDownModule():
-    for p in (_DEM, _DEM + ".cmp.tif"):
+    for p in (_DEM, _DEM + ".cmp.tif", _FLOW_DEM):
         try:
             os.remove(p)
         except OSError:
@@ -231,6 +271,78 @@ class WatershedProjectedTests(unittest.TestCase):
             frac_capped, 0.02,
             msg=f"{frac_capped*100:.1f}% of LS cells pegged at the cap "
                 "(degree-scaled 4326 symptom)",
+        )
+
+
+@unittest.skipUnless(_FLOW and _GDAL, "GRASS flowlines unavailable")
+class FlowlinesProjectedTests(unittest.TestCase):
+    """mfd_flowlines must run its D8/MFD routing in a projected metric CRS.
+
+    In native 4326 the cells are anisotropic, so (a) r.watershed's flow
+    direction is biased toward the compressed axis and (b) path lengths use
+    one averaged degree->metre cell size. Running the pipeline in EPSG:5070
+    on a 10 m square grid fixes both. These tests assert the projected DEM is
+    produced and that profile step lengths match the true 10 m cell pitch
+    (which the buggy 4326 path reports as ~7.8 m for an E-W flow line).
+    """
+    OUTDIR = "tests/out_flow_quality"
+    OPTS = {"min_line_length_ft": 60, "max_lines": 4,
+            "min_flow_accumulation_cells": 30, "draw_threshold_cells": 200}
+
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs(cls.OUTDIR, exist_ok=True)
+        cls.dem = _ensure_flow_dem()
+        cls.raw = get_mfd_flowlines_raw(cls.dem, cls.OUTDIR, options=cls.OPTS)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.OUTDIR, ignore_errors=True)
+
+    def test_flow_dem_is_projected(self):
+        """The pipeline must reproject the DEM into the metric flow CRS
+        before routing — proven by the projected DEM landing in outdir with
+        a projected, square-metre grid."""
+        proj = os.path.join(self.OUTDIR, f"flow_dem_epsg{_FLOW_EPSG}.tif")
+        self.assertTrue(os.path.exists(proj),
+                        "flowlines did not write the projected flow DEM")
+        ds = gdal.Open(proj)
+        srs = osr.SpatialReference(wkt=ds.GetProjection())
+        gt = ds.GetGeoTransform()
+        ds = None
+        self.assertTrue(srs.IsProjected(), "flow DEM is not in a projected CRS")
+        self.assertAlmostEqual(abs(gt[1]), _FLOW_RES_M, delta=0.01)
+        self.assertAlmostEqual(abs(gt[5]), _FLOW_RES_M, delta=0.01)
+
+    def test_profile_steps_sit_on_projected_square_grid(self):
+        """Consecutive profile vertices are one cell apart, so on a true
+        square metric grid every step is the orthogonal pitch (~10 m) or the
+        diagonal (~14.14 m) — nothing in between. In the 4326 pipeline the
+        anisotropic cells make E-W steps ~7.8 m and diagonals ~12.9 m, which
+        fall off that grid. Assert the overwhelming majority of steps land on
+        the {10, 10·√2} lattice."""
+        root2 = 2 ** 0.5
+        steps = []
+        for rec in self.raw:
+            prof = rec.get("profile_vertices_m") or []
+            cum = [p[0] for p in prof]
+            steps += [b - a for a, b in zip(cum, cum[1:]) if b - a > 1e-6]
+        self.assertGreaterEqual(
+            len(steps), 10,
+            "synthetic flow DEM produced too few profile steps to assess",
+        )
+        on_grid = [
+            d for d in steps
+            if min(abs(d / _FLOW_RES_M - 1.0),
+                   abs(d / _FLOW_RES_M - root2)) < 0.03
+        ]
+        frac = len(on_grid) / len(steps)
+        self.assertGreaterEqual(
+            frac, 0.9,
+            msg=f"only {frac*100:.0f}% of profile steps sit on the projected "
+                f"{_FLOW_RES_M:.0f} m square grid (4326 anisotropy puts E-W "
+                "steps at ~7.8 m); median step "
+                f"{float(np.median(steps)):.2f} m",
         )
 
 
