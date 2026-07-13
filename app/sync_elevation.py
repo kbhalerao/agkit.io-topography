@@ -48,6 +48,14 @@ _VSIS3_OPTS = {
     "AWS_REGION": settings.AWS_REGION,
     "GDAL_HTTP_MAX_RETRY": "3",
     "GDAL_HTTP_RETRY_DELAY": "1",
+    # Skip the bucket directory LIST that GDAL does on first open — on the huge
+    # anonymous prd-tnm bucket that LIST is what made a cold /vsis3 open take
+    # ~20s (and 503 the endpoint). EMPTY_DIR opens the file directly.
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    # Don't probe for sidecars (.ovr/.aux.xml/...): the USGS COGs carry internal
+    # overviews, so only ever fetch the .tif.
+    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
+    "VSI_CACHE": "TRUE",
 }
 
 # Small buffer (deg) so the image isn't clipped hard to the fenceline.
