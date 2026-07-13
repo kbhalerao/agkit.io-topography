@@ -140,9 +140,14 @@ range requests, not the full ~440 MB tile.
 
 The Lambda execution role has **no IAM grant** on `prd-tnm` (by
 design — no static keys, minimal role), and the bucket allows
-anonymous reads, so GDAL is told not to sign: `AWS_NO_SIGN_REQUEST=YES`
-(set via `gdal.SetConfigOption`, alongside `AWS_REGION` and
-`GDAL_HTTP_MAX_RETRY`). A *signed* request would 403 with
+anonymous reads, so GDAL is told not to sign: `AWS_NO_SIGN_REQUEST=YES`,
+applied via a **scoped** `gdal.config_options(...)` around each tile read
+(so the options never leak into local-file GDAL ops), alongside
+`AWS_REGION`, `GDAL_HTTP_MAX_RETRY`, and
+`GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR`. That last one skips the bucket
+directory LIST GDAL otherwise does on first open — on the huge anonymous
+`prd-tnm` bucket that LIST added ~20 s to a cold read (and 503'd the sync
+endpoint at API Gateway's 30 s cap). A *signed* request would 403 with
 `AccessDenied`. The boto3 `s3_client()` in `downloader.py` is reserved
 for our own buckets (sidecar-zip fetches) and is unaffected. Any
 daughter project reading `prd-tnm` must do the same — do not sign with
