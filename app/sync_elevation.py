@@ -146,6 +146,39 @@ def _extent_of(ds) -> list[float]:
     return [west, south, east, north]
 
 
+# A real, always-present Oregon tile used only to warm the /vsis3 path on
+# /prime. Any valid tile works — the win is priming GDAL's S3/CURL/driver state,
+# which is process-global and transfers to real renders of other tiles.
+_PRIME_TILE = "n45w124"
+
+
+def prime() -> dict:
+    """Warm the process so the next render skips the cold first-access cost.
+
+    A cold container's first render is dominated not by the render logic (which
+    is ~100 ms warm) but by the first `/vsis3` access to prd-tnm — CURL/TLS/DNS
+    setup, the S3 region probe, and COG codec init. This opens one tile and
+    reads a small overview window to pay that cost up front. All of it is
+    process-global, so it transfers to subsequent renders of *any* boundary.
+
+    Bounded on purpose (one tile, a ≤64 px overview read, no full-res clip) so
+    `/prime` itself returns well under the 30 s API Gateway ceiling even cold.
+    """
+    src = _tile_source(_PRIME_TILE)
+    with gdal.config_options(_VSIS3_OPTS):
+        ds = gdal.Open(src)
+        if ds is None:
+            raise RuntimeError(f"prime: could not open {src}")
+        band = ds.GetRasterBand(1)
+        n_ov = band.GetOverviewCount()
+        read_band = band.GetOverview(n_ov - 1) if n_ov else band
+        w, h = min(64, read_band.XSize), min(64, read_band.YSize)
+        read_band.ReadAsArray(0, 0, w, h)  # one real (small) block transfer
+        raster_size = [ds.RasterXSize, ds.RasterYSize]
+        ds = None
+    return {"primed": True, "tile": _PRIME_TILE, "raster_size": raster_size}
+
+
 def render_elevation(boundary_geojson: dict) -> dict:
     """Boundary in, colorized elevation PNG out.
 

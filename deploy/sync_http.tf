@@ -82,6 +82,13 @@ resource "aws_apigatewayv2_route" "options_elevation" {
   target    = "integrations/${aws_apigatewayv2_integration.sync_http.id}"
 }
 
+# Warm-up ping (unmetered) — boots the container + primes the /vsis3 path.
+resource "aws_apigatewayv2_route" "get_prime" {
+  api_id    = aws_apigatewayv2_api.sync_http.id
+  route_key = "GET /prime"
+  target    = "integrations/${aws_apigatewayv2_integration.sync_http.id}"
+}
+
 resource "aws_cloudwatch_log_group" "sync_http_access" {
   name              = "/aws/apigateway/${var.name_prefix}-sync"
   retention_in_days = var.log_retention_days

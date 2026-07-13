@@ -120,6 +120,7 @@ class HttpHandlerTests(unittest.TestCase):
             "png": PNG, "extent": [-91.5, 41.5, -91.4, 41.6],
             "width": 10, "height": 10,
         })
+        self.fake.prime = mock.Mock(return_value={"primed": True, "tile": "n45w124"})
         sys.modules["app.sync_elevation"] = self.fake
         from app import http_handler
         self.handler = http_handler.handler
@@ -139,6 +140,15 @@ class HttpHandlerTests(unittest.TestCase):
     def test_options_preflight(self):
         resp = self.handler(self._event("", method="OPTIONS"), None)
         self.assertEqual(resp["statusCode"], 204)
+
+    def test_prime_endpoint_unmetered(self):
+        # /prime runs before the gate and returns prime()'s status.
+        with mock.patch.object(metering, "gate") as gate:
+            resp = self.handler(self._event("", method="GET", path="/prime"), None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertTrue(json.loads(resp["body"])["primed"])
+        self.fake.prime.assert_called_once()
+        gate.assert_not_called()  # warm-up is never metered
 
     def test_serve_returns_png(self):
         with mock.patch.object(metering, "gate",

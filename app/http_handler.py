@@ -60,6 +60,16 @@ def handler(event, context):
     if method.upper() == "OPTIONS":
         return {"statusCode": 204, "headers": _CORS, "isBase64Encoded": False, "body": ""}
 
+    # Warm-up endpoint — unmetered, no gate. Hitting it once boots the container
+    # and primes the /vsis3 path so subsequent /elevation calls run warm-fast.
+    if path == "/prime":
+        from app.sync_elevation import prime
+        try:
+            return _json_response(200, prime())
+        except Exception as exc:
+            logger.exception("prime failed")
+            return _json_response(502, {"error": "prime_failed", "detail": str(exc)})
+
     # 1. x402 gate — reject before doing any DEM work.
     decision = metering.gate(method, path, headers)
     if decision.action == "reject":
