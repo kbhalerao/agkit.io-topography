@@ -1,0 +1,8 @@
+# GDAL must match your system libgdal version, e.g. `gdalinfo --version`.
+# The topography Lambda image is GDAL 3.11 / Python 3.12.
+GDAL
+
+# Only needed for the HTTP wrapper (service.py); the core
+# (app/sync_elevation.py) depends on osgeo plus stdlib-only app modules.
+fastapi
+uvicorn[standard]

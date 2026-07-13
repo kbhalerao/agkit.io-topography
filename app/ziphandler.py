@@ -26,6 +26,13 @@ _VSIS3_CONFIG = {
     "AWS_REGION": settings.AWS_REGION,
     "GDAL_HTTP_MAX_RETRY": "3",
     "GDAL_HTTP_RETRY_DELAY": "1",
+    # Skip the bucket directory LIST GDAL does on first open — on the huge
+    # anonymous prd-tnm bucket that LIST added ~20s to a cold tile read.
+    # EMPTY_DIR opens the file directly. Only ever fetch the .tif (the COGs
+    # carry internal overviews, no sidecars), and cache VSI reads.
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
+    "VSI_CACHE": "TRUE",
 }
 
 
@@ -52,8 +59,6 @@ def download_USGS_dem(dem_folder, dem_tile_lat, dem_tile_long, field_extent=None
         source = f"tests/{file}"
     else:
         source = f"/vsis3/{settings.USGS_13_DEM_BUCKET}/{key}"
-        for opt, value in _VSIS3_CONFIG.items():
-            gdal.SetConfigOption(opt, value)
 
     usgs_tif = os.path.join(dem_folder, file)
 
@@ -76,7 +81,13 @@ def download_USGS_dem(dem_folder, dem_tile_lat, dem_tile_long, field_extent=None
         print("Clipping USGS tile to extent:  ", translate_kwargs["projWin"])
 
     print(f"Reading DEM tile: {source}")
-    out_ds = gdal.Translate(usgs_tif, source, **translate_kwargs)
+    if settings.IN_TEST:
+        out_ds = gdal.Translate(usgs_tif, source, **translate_kwargs)
+    else:
+        # Scope the /vsis3 options (unsigned + no directory LIST) to just this
+        # read so they never leak into the worker's local-file GDAL ops.
+        with gdal.config_options(_VSIS3_CONFIG):
+            out_ds = gdal.Translate(usgs_tif, source, **translate_kwargs)
     if out_ds is None:
         raise RuntimeError(f"gdal.Translate produced no output for {source}")
     out_ds = None  # flush to disk
