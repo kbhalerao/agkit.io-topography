@@ -225,6 +225,27 @@ vars if you prefer a file.
 
 ---
 
+## Cold starts & `GET /prime`
+
+The API Gateway HTTP API has a hard **30 s** integration timeout. Two things
+kept the first request under it:
+
+1. **`GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR`** (in `_VSIS3_OPTS`). Without it,
+   GDAL does a bucket directory LIST on the first `/vsis3` open — on the huge
+   anonymous `prd-tnm` bucket that alone was **~24 s**, which 503'd cold calls.
+   With it, the cold render drops to ~1 s.
+2. **`GET /prime`** (unmetered, no gate) — boots the container and primes the
+   `/vsis3` path (process-global CURL/S3/codec state). Hit it once and
+   subsequent `/elevation` calls run fully warm.
+
+Measured (deployed, us-west-2): cold `/prime` **2.9 s**, warm `/elevation`
+**0.5–0.9 s**, worst-case first-ever cold `/elevation` ~11 s — all under 30 s.
+`/prime` is now optional polish; the readdir fix alone clears the ceiling.
+
+> The same `GDAL_DISABLE_READDIR_ON_OPEN` win applies to the async worker's
+> `ziphandler._VSIS3_CONFIG` — worth porting there too (it just doesn't hit a
+> 30 s HTTP cap, so it was never visible).
+
 ## What was deliberately left out
 
 GRASS/flow, blended hillshade, projected-CRS resampling, scalar/vector outputs,
