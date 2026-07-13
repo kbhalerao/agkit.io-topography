@@ -27,3 +27,20 @@ output "sqs_queue_arn" {
 output "log_group_name" {
   value = aws_cloudwatch_log_group.lambda.name
 }
+
+# --------------------------------------------------------------------------
+# Sync elevation HTTP endpoint
+# --------------------------------------------------------------------------
+output "sync_http_function_name" {
+  value = aws_lambda_function.sync_http.function_name
+}
+
+output "sync_http_api_endpoint" {
+  description = "Base URL of the API Gateway HTTP API. POST to {this}/elevation."
+  value       = aws_apigatewayv2_api.sync_http.api_endpoint
+}
+
+output "sync_http_custom_domain_target" {
+  description = "CNAME topo.agkit.io to this in Cloudflare (null until custom_domain_name + certificate_arn are set)."
+  value       = try(aws_apigatewayv2_domain_name.sync_http[0].domain_name_configuration[0].target_domain_name, null)
+}

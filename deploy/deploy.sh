@@ -12,7 +12,18 @@
 #   AWS_REGION   Defaults to us-west-2 (colocated with USGS DEM bucket).
 #   IMAGE_TAG    Defaults to current git short SHA.
 #
+# Sync elevation endpoint (deploy/sync_http.tf) — all optional; unset falls back
+# to the terraform default (metering off, no custom domain):
+#   METERING_ENABLED              true|false
+#   X402_BASE_URL                 e.g. https://x402.agkit.io
+#   X402_GATEWAY_TOKEN            gateway DRF token (SECRET — passed via TF_VAR_
+#                                 env so it never lands on the command line / ps)
+#   METERING_CATALOG_PATH_PREFIX  default /x402/v1/topo
+#   CUSTOM_DOMAIN_NAME            e.g. topo.agkit.io
+#   CERTIFICATE_ARN              validated ACM cert ARN (us-west-2)
+#
 # Uses your default AWS profile. State is local to deploy/ and gitignored.
+# A deploy/terraform.tfvars (gitignored) is also auto-loaded and overrides these.
 
 set -euo pipefail
 
@@ -39,6 +50,18 @@ ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 ECR_REPO_URL="${ECR_REGISTRY}/${IMAGE_NAME}"
 
 TF_VARS=(-var "image_tag=${IMAGE_TAG}" -var "aws_region=${AWS_REGION}")
+
+# Optional sync-endpoint config, sourced from the environment so nothing has to
+# be committed. Each is appended only when set; otherwise the terraform default
+# applies (metering off, no custom domain).
+[[ -n "${METERING_ENABLED:-}" ]]             && TF_VARS+=(-var "metering_enabled=${METERING_ENABLED}")
+[[ -n "${X402_BASE_URL:-}" ]]                && TF_VARS+=(-var "x402_base_url=${X402_BASE_URL}")
+[[ -n "${METERING_CATALOG_PATH_PREFIX:-}" ]] && TF_VARS+=(-var "metering_catalog_path_prefix=${METERING_CATALOG_PATH_PREFIX}")
+[[ -n "${CUSTOM_DOMAIN_NAME:-}" ]]           && TF_VARS+=(-var "custom_domain_name=${CUSTOM_DOMAIN_NAME}")
+[[ -n "${CERTIFICATE_ARN:-}" ]]              && TF_VARS+=(-var "certificate_arn=${CERTIFICATE_ARN}")
+# Secret: hand to terraform via TF_VAR_ env (read natively) so it is never in
+# the -var args visible to `ps`.
+[[ -n "${X402_GATEWAY_TOKEN:-}" ]]           && export TF_VAR_x402_gateway_token="${X402_GATEWAY_TOKEN}"
 
 tf_init() {
   cd "${TF_DIR}"

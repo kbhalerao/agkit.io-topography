@@ -50,3 +50,55 @@ variable "sqs_visibility_timeout_seconds" {
   type        = number
   default     = 960
 }
+
+# --------------------------------------------------------------------------
+# Sync elevation HTTP endpoint (deploy/sync_http.tf)
+# --------------------------------------------------------------------------
+variable "sync_lambda_memory_mb" {
+  description = "Memory for the sync HTTP Lambda. More memory = more vCPU = faster GDAL cold init + render."
+  type        = number
+  default     = 3008
+}
+
+variable "sync_lambda_timeout_seconds" {
+  description = "Timeout for the sync HTTP Lambda. Capped at 30s by the API Gateway integration."
+  type        = number
+  default     = 30
+}
+
+variable "metering_enabled" {
+  description = "Turn on x402 self-metering in the sync Lambda. When false, the endpoint serves unmetered (good for initial smoke testing)."
+  type        = bool
+  default     = false
+}
+
+variable "x402_base_url" {
+  description = "x402 control-plane base URL (e.g. https://x402.agkit.io). Required when metering_enabled."
+  type        = string
+  default     = ""
+}
+
+variable "x402_gateway_token" {
+  description = "DRF token for the x402 topo-gateway user (from create_gateway_user). Required when metering_enabled. Consider Secrets Manager for hardening."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "metering_catalog_path_prefix" {
+  description = "Namespaces the request path to the catalog item: request /elevation + this prefix = /x402/v1/topo/elevation."
+  type        = string
+  default     = "/x402/v1/topo"
+}
+
+variable "custom_domain_name" {
+  description = "Custom domain for the endpoint, e.g. topo.agkit.io. Leave empty to use the execute-api URL. Requires certificate_arn."
+  type        = string
+  default     = ""
+}
+
+variable "certificate_arn" {
+  description = "ARN of a validated ACM cert (in aws_region) for custom_domain_name. DNS is in Cloudflare, so validate the cert out of band and pass its ARN here."
+  type        = string
+  default     = ""
+}
