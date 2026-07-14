@@ -193,13 +193,16 @@ def render_elevation(boundary_geojson: dict) -> dict:
     Returns::
 
         {
-          "png": <bytes>,                        # RGBA color-relief PNG
+          "png": <bytes>,                        # RGBA color-relief PNG (display)
+          "tif": <bytes>,                        # single-band Float32 GeoTIFF (data)
           "extent": [west, south, east, north],  # true bounds, EPSG:4326
           "width": int, "height": int,           # pixel dims
         }
 
-    The PNG carries no georeferencing (color-relief drops it), so `extent`
-    travels alongside it — a map client needs it to place the image.
+    The PNG is for display; the GeoTIFF is the actual clipped elevation data
+    (georeferenced, so a client can read values / reproject). The PNG carries
+    no georeferencing (color-relief drops it), so `extent` travels alongside it
+    — a map client needs it to place the image. Both share `extent`.
 
     Raises ValueError on a bad / oversized boundary, RuntimeError on read.
     """
@@ -250,13 +253,15 @@ def render_elevation(boundary_geojson: dict) -> dict:
             colorFilename=ramp.name,
             addAlpha=True,
         )
-    clip = None
+    clip = None  # flush the GeoTIFF to /vsimem before we slurp it
 
     png = _read_vsimem("/vsimem/color.png")
+    tif = _read_vsimem("/vsimem/clip.tif")
 
     # Don't leak the in-memory files across calls in a long-lived server.
     for p in ("/vsimem/dem.vrt", "/vsimem/clip.tif",
               "/vsimem/color.png", "/vsimem/color.png.aux.xml"):
         gdal.Unlink(p)
 
-    return {"png": png, "extent": extent, "width": width, "height": height}
+    return {"png": png, "tif": tif, "extent": extent,
+            "width": width, "height": height}
