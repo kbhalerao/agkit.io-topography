@@ -29,6 +29,8 @@ except Exception:  # ImportError, or gdal present but broken
     HAVE_GDAL = False
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# GeoTIFF byte-order magic: little-endian ("II*\x00") or big-endian ("MM\x00*").
+TIFF_MAGICS = (b"II*\x00", b"MM\x00*")
 
 
 @unittest.skipUnless(HAVE_GDAL, "GDAL not available (run inside the Lambda image)")
@@ -81,6 +83,23 @@ class RenderFromFixtureTests(unittest.TestCase):
         self.assertGreater(result["width"], 0)
         self.assertGreater(result["height"], 0)
 
+    def test_returns_tif_data(self):
+        # The GeoTIFF is the actual clipped elevation data, shipped alongside
+        # the display PNG. It must be a real, georeferenced single-band raster.
+        result = sync_elevation.render_elevation(self.BOUNDARY)
+        self.assertTrue(result["tif"].startswith(TIFF_MAGICS))
+        gdal.FileFromMemBuffer("/vsimem/_test_clip.tif", result["tif"])
+        try:
+            ds = gdal.Open("/vsimem/_test_clip.tif")
+            self.assertIsNotNone(ds)
+            self.assertEqual(ds.RasterCount, 1)
+            self.assertEqual(ds.RasterXSize, result["width"])
+            self.assertEqual(ds.RasterYSize, result["height"])
+            self.assertNotEqual(ds.GetProjection(), "")  # carries georeferencing
+            ds = None
+        finally:
+            gdal.Unlink("/vsimem/_test_clip.tif")
+
     def test_extent_brackets_boundary(self):
         result = sync_elevation.render_elevation(self.BOUNDARY)
         w, s, e, n = result["extent"]
@@ -113,6 +132,8 @@ class RenderLiveOregonTests(unittest.TestCase):
         result = sync_elevation.render_elevation(boundary)
         self.assertTrue(result["png"].startswith(PNG_MAGIC))
         self.assertGreater(len(result["png"]), 100)
+        self.assertTrue(result["tif"].startswith(TIFF_MAGICS))
+        self.assertGreater(len(result["tif"]), 100)
 
 
 if __name__ == "__main__":

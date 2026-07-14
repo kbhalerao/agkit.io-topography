@@ -9,7 +9,8 @@ HTTP API with a Cloudflare CNAME (topo.agkit.io), in us-west-2.
 Flow, per request:
   1. x402 gate (app.metering) — mirror of prismuserv's metering decision table.
      Rejects (401/403) short-circuit before any DEM work.
-  2. render_elevation(boundary) — boundary GeoJSON in, colorized PNG out.
+  2. render_elevation(boundary) — boundary GeoJSON in, a JSON envelope carrying
+     both the color-relief PNG (display) and the single-band GeoTIFF (data) out.
   3. On a 2xx with a billable consumer, POST one usage event to x402.
 
 The Lambda self-bills (no gateway in front doing it): the gate resolves the
@@ -100,13 +101,13 @@ def handler(event, context):
     if decision.action == "serve_and_record" and decision.record_key_hash:
         metering.report_usage(decision.record_key_hash, decision.endpoint_slug)
 
-    return {
-        "statusCode": 200,
-        "headers": {
-            "content-type": "image/png",
-            "x-extent": json.dumps(result["extent"]),
-            **_CORS,
-        },
-        "isBase64Encoded": True,
-        "body": base64.b64encode(result["png"]).decode("ascii"),
-    }
+    # Both artifacts + metadata ride in one JSON body: the PNG for display and
+    # the single-band GeoTIFF for the actual elevation data. Binaries are
+    # base64 (JSON can't carry raw bytes); `extent` places the georef-less PNG.
+    return _json_response(200, {
+        "png": base64.b64encode(result["png"]).decode("ascii"),
+        "tif": base64.b64encode(result["tif"]).decode("ascii"),
+        "extent": result["extent"],
+        "width": result["width"],
+        "height": result["height"],
+    })

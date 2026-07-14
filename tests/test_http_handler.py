@@ -16,6 +16,7 @@ from unittest import mock
 from app import metering
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png-bytes"
+TIF = b"II*\x00" + b"fake-tif-bytes"
 
 # One monitor endpoint + one enforce endpoint, plus three consumers.
 GOOD = "good-key"       # active, permitted for both
@@ -117,7 +118,7 @@ class HttpHandlerTests(unittest.TestCase):
         # without GDAL.
         self.fake = types.ModuleType("app.sync_elevation")
         self.fake.render_elevation = mock.Mock(return_value={
-            "png": PNG, "extent": [-91.5, 41.5, -91.4, 41.6],
+            "png": PNG, "tif": TIF, "extent": [-91.5, 41.5, -91.4, 41.6],
             "width": 10, "height": 10,
         })
         self.fake.prime = mock.Mock(return_value={"primed": True, "tile": "n45w124"})
@@ -150,15 +151,18 @@ class HttpHandlerTests(unittest.TestCase):
         self.fake.prime.assert_called_once()
         gate.assert_not_called()  # warm-up is never metered
 
-    def test_serve_returns_png(self):
+    def test_serve_returns_png_and_tif(self):
         with mock.patch.object(metering, "gate",
                                return_value=metering.Decision("serve")):
             resp = self.handler(self._event({"type": "Polygon", "coordinates": []}), None)
         self.assertEqual(resp["statusCode"], 200)
-        self.assertEqual(resp["headers"]["content-type"], "image/png")
-        self.assertTrue(resp["isBase64Encoded"])
-        self.assertEqual(base64.b64decode(resp["body"]), PNG)
-        self.assertEqual(json.loads(resp["headers"]["x-extent"]), [-91.5, 41.5, -91.4, 41.6])
+        self.assertEqual(resp["headers"]["content-type"], "application/json")
+        self.assertFalse(resp["isBase64Encoded"])
+        body = json.loads(resp["body"])
+        self.assertEqual(base64.b64decode(body["png"]), PNG)
+        self.assertEqual(base64.b64decode(body["tif"]), TIF)
+        self.assertEqual(body["extent"], [-91.5, 41.5, -91.4, 41.6])
+        self.assertEqual((body["width"], body["height"]), (10, 10))
 
     def test_serve_and_record_bills(self):
         decision = metering.Decision("serve_and_record", "elevation", "abc123")
