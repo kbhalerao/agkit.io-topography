@@ -65,12 +65,15 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 }
 
 data "aws_iam_policy_document" "lambda_sqs" {
+  # The SQS worker drains the queue; the sync/async HTTP Lambda (same role)
+  # publishes into it (POST /elevation/async → SendMessage).
   statement {
     actions = [
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes",
       "sqs:ChangeMessageVisibility",
+      "sqs:SendMessage",
     ]
     resources = [aws_sqs_queue.jobs.arn]
   }
@@ -115,6 +118,13 @@ resource "aws_lambda_function" "topography" {
     variables = {
       POSTBACK_TIMEOUT_SECONDS = "60"
       IN_TEST                  = "false"
+      # Metering for record-on-completion: the worker reports a usage event
+      # after a successful postback for jobs the async endpoint tagged. Same
+      # x402 config/usage contract as the sync Lambda.
+      METERING_ENABLED             = tostring(var.metering_enabled)
+      X402_BASE_URL                = var.x402_base_url
+      X402_GATEWAY_TOKEN           = var.x402_gateway_token
+      METERING_CATALOG_PATH_PREFIX = var.metering_catalog_path_prefix
     }
   }
 

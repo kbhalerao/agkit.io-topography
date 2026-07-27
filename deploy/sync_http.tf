@@ -40,6 +40,9 @@ resource "aws_lambda_function" "sync_http" {
       X402_BASE_URL                = var.x402_base_url
       X402_GATEWAY_TOKEN           = var.x402_gateway_token
       METERING_CATALOG_PATH_PREFIX = var.metering_catalog_path_prefix
+      # POST /elevation/async publishes the job here (the queue the SQS worker
+      # drains); the role gains sqs:SendMessage in main.tf.
+      JOBS_QUEUE_URL = aws_sqs_queue.jobs.url
     }
   }
 
@@ -79,6 +82,21 @@ resource "aws_apigatewayv2_route" "post_elevation" {
 resource "aws_apigatewayv2_route" "options_elevation" {
   api_id    = aws_apigatewayv2_api.sync_http.id
   route_key = "OPTIONS /elevation"
+  target    = "integrations/${aws_apigatewayv2_integration.sync_http.id}"
+}
+
+# Async: same Lambda/integration. The handler gates, then publishes the job to
+# SQS and returns 202 — no DEM work on this path, so it stays fast under the
+# 30s API Gateway cap. Billing happens worker-side on a successful postback.
+resource "aws_apigatewayv2_route" "post_elevation_async" {
+  api_id    = aws_apigatewayv2_api.sync_http.id
+  route_key = "POST /elevation/async"
+  target    = "integrations/${aws_apigatewayv2_integration.sync_http.id}"
+}
+
+resource "aws_apigatewayv2_route" "options_elevation_async" {
+  api_id    = aws_apigatewayv2_api.sync_http.id
+  route_key = "OPTIONS /elevation/async"
   target    = "integrations/${aws_apigatewayv2_integration.sync_http.id}"
 }
 

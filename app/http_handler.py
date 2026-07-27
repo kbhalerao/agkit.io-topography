@@ -1,21 +1,31 @@
-"""API Gateway HTTP handler for the synchronous elevation endpoint.
+"""API Gateway HTTP handler for the elevation endpoints (sync + async).
 
 Entrypoint: `app.http_handler.handler`. This is the SECOND trigger on the same
 container image as the SQS worker (`app.handler.handler`) — the image already
-carries GDAL, so a sync HTTP surface is just another handler. Deploy it as its
-own Lambda function (own memory/timeout/concurrency), fronted by API Gateway
-HTTP API with a Cloudflare CNAME (topo.agkit.io), in us-west-2.
+carries GDAL, so an HTTP surface is just another handler. Deploy it as its own
+Lambda function (own memory/timeout/concurrency), fronted by API Gateway HTTP
+API with a Cloudflare CNAME (topo.agkit.io), in us-west-2.
 
-Flow, per request:
-  1. x402 gate (app.metering) — mirror of prismuserv's metering decision table.
-     Rejects (401/403) short-circuit before any DEM work.
-  2. render_elevation(boundary) — boundary GeoJSON in, a JSON envelope carrying
-     both the color-relief PNG (display) and the single-band GeoTIFF (data) out.
-  3. On a 2xx with a billable consumer, POST one usage event to x402.
+Two routes, both x402-gated (app.metering):
+
+  POST /elevation        SYNC  — boundary GeoJSON in; a JSON envelope carrying
+                                 the color-relief PNG + single-band GeoTIFF out.
+                                 Billed here: one usage event on a 2xx.
+
+  POST /elevation/async  ASYNC — a metered SQS-publish proxy. The caller sends
+                                 the job payload (the same shape Django's
+                                 LambdaEventBuilder produces, carrying its own
+                                 signed post_url); the handler gates it, stamps
+                                 the resolved consumer onto each job, and drops
+                                 it on the jobs queue the SQS worker drains.
+                                 Billed on COMPLETION: the worker reports one
+                                 usage event per job only after its postback
+                                 succeeds (see app.geoworker.process_payload),
+                                 so accepted-then-failed jobs never bill.
 
 The Lambda self-bills (no gateway in front doing it): the gate resolves the
-consumer from the cached x402 catalog config and the usage POST records the
-call. See app.metering for the config/usage contracts.
+consumer from the cached x402 catalog config. See app.metering for the
+config/usage contracts and app.publisher for the SQS publish.
 """
 from __future__ import annotations
 
@@ -23,7 +33,7 @@ import base64
 import json
 import logging
 
-from app import metering
+from app import metering, publisher
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,49 @@ def _request(event: dict) -> tuple[str, str, dict, str | None]:
     return method, path, headers, body
 
 
+def _handle_async(raw_body: str | None, decision) -> dict:
+    """Accept an async topography job, meter-tag it, and enqueue it.
+
+    The body is the job payload Django's LambdaEventBuilder already produces —
+    a list of per-job dicts (or a single dict), each carrying its own signed
+    `post_url`. We forward it verbatim onto the SQS jobs queue; the only
+    mutation is stamping the resolved consumer onto each job under `metering`
+    so the worker can bill on a successful postback. A job with no `metering`
+    block (anonymous / unmetered) is processed but never billed.
+    """
+    try:
+        jobs = json.loads(raw_body) if raw_body else None
+    except (ValueError, TypeError) as exc:
+        return _json_response(400, {"error": "bad_request", "detail": str(exc)})
+
+    if isinstance(jobs, dict):
+        jobs = [jobs]
+    if not isinstance(jobs, list) or not jobs:
+        return _json_response(
+            400, {"error": "bad_request", "detail": "body must be a non-empty job list"})
+    if not all(isinstance(j, dict) and "metadata" in j for j in jobs):
+        return _json_response(
+            400, {"error": "bad_request", "detail": "each job needs a metadata object"})
+
+    # Stamp the consumer so the worker bills on completion (record-on-completion:
+    # accepted-then-failed jobs never bill). Only when the gate resolved a
+    # billable consumer for this call.
+    if decision.action == "serve_and_record" and decision.record_key_hash:
+        for job in jobs:
+            job["metering"] = {
+                "key_hash": decision.record_key_hash,
+                "endpoint": decision.endpoint_slug,
+            }
+
+    try:
+        message_id = publisher.publish_jobs(jobs)
+    except Exception as exc:  # enqueue failed — the job was NOT accepted
+        logger.exception("async enqueue failed")
+        return _json_response(502, {"error": "enqueue_failed", "detail": str(exc)})
+
+    return _json_response(202, {"status": "accepted", "jobs": len(jobs), "message_id": message_id})
+
+
 def handler(event, context):
     method, path, headers, raw_body = _request(event)
 
@@ -71,11 +124,17 @@ def handler(event, context):
             logger.exception("prime failed")
             return _json_response(502, {"error": "prime_failed", "detail": str(exc)})
 
-    # 1. x402 gate — reject before doing any DEM work.
+    # 1. x402 gate — reject before doing any work. The gate is path-aware, so it
+    # resolves /elevation vs /elevation/async to their own catalog items.
     decision = metering.gate(method, path, headers)
     if decision.action == "reject":
         err = decision.error or {"status": 402, "code": "payment_required", "detail": ""}
         return _json_response(err["status"], {"error": err["code"], "detail": err["detail"]})
+
+    # Async route: hand the (gated) job off to SQS; billing happens on the
+    # worker side when the postback lands. Anything else is the sync render.
+    if path.rstrip("/") == "/elevation/async":
+        return _handle_async(raw_body, decision)
 
     # 2. Parse + render.
     try:
