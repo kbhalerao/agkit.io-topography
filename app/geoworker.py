@@ -1271,6 +1271,35 @@ class LambdaGISProcessor:
 # Entry points used by the SQS handler
 # ---------------------------------------------------------------------------
 
+def _job_succeeded(result) -> bool:
+    """Did this job's work + postback land cleanly?
+
+    `process_payload` sets `result` to the string ``"ERROR"`` on an exception,
+    or to the job function's return — a list of per-artifact status strings
+    (``"... posted successfully."`` / ``"Error posting ..."``). Treat any error
+    marker as a failure so a job whose postback got a non-2xx (topo's named
+    silent-failure mode) is not billed. Best-effort: a shape we don't
+    recognize is treated as success (fail-open, matching metering's posture).
+    """
+    if result == "ERROR":
+        return False
+    items = result if isinstance(result, (list, tuple)) else [result]
+    return not any(isinstance(i, str) and "error" in i.lower() for i in items)
+
+
+def _report_completion(job: dict, result) -> None:
+    """Report one usage event for a successful, metered async job. Best-effort:
+    swallows everything — billing must never perturb job processing."""
+    meter = job.get("metering") if isinstance(job, dict) else None
+    if not meter or not meter.get("key_hash") or not _job_succeeded(result):
+        return
+    try:
+        from app import metering
+        metering.report_usage(meter["key_hash"], meter.get("endpoint"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"metering: completion report failed: {exc!r}")
+
+
 def process_payload(payload: list) -> list:
     """
     Run every job in `payload` (the parsed SQS message body — a list of
@@ -1293,6 +1322,11 @@ def process_payload(payload: list) -> list:
         except Exception as exc:
             print(f"Job function error: {fn_name} → {exc}")
             result = "ERROR"
+        # x402 record-on-completion: bill an async job only once its work +
+        # postback actually succeeded (see app.http_handler._handle_async for
+        # where the `metering` block is stamped). Best-effort — never affects
+        # the job result. Anonymous/unmetered jobs carry no block and are skipped.
+        _report_completion(job, result)
         site_prefix = job["metadata"].get("site_prefix", "agkit")
         field_id = job["metadata"].get("field_id")
         results.append(

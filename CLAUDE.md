@@ -18,6 +18,11 @@ Dockerized Lambda for USGS 10m DEM-derived topography, plugged into
 ```
 app/
 ├── handler.py        # SQS event router (entrypoint: app.handler.handler)
+├── http_handler.py   # API Gateway handler (entrypoint: app.http_handler.handler)
+│                     #   POST /elevation (sync) + POST /elevation/async (metered
+│                     #   SQS-publish proxy) + GET /prime warm-up
+├── publisher.py      # boto3 SQS send for the async endpoint (POST /elevation/async)
+├── metering.py       # x402 gate + usage report (config/usage against control plane)
 ├── geoworker.py      # LambdaGISProcessor — named function-per-parameter
 ├── grass_handler.py  # GRASS r.watershed; exports drainage/stream/spi/tci/L/LS
 ├── downloader.py     # S3 fetch helpers for our own buckets (sidecar zips)
@@ -28,6 +33,22 @@ app/
 ├── reducers.py       # Raster → scalar reduction over field polygon
 └── settings.py       # Minimal env-driven config
 ```
+
+## Async over HTTP (x402-metered)
+
+`POST /elevation/async` on `topo.agkit.io` puts a metered front door on the SQS
+pipeline. The caller sends the same job list `LambdaEventBuilder.build_event()`
+produces (carrying its own signed `post_url`); `http_handler` gates it, publishes
+it to the `jobs` queue verbatim, and returns `202`. The Lambda→postback path is
+unchanged. Callers migrating off direct SQS publish just POST the same payload
+here with an `Authorization: Bearer <bypass-token>` header.
+
+Billing is **record-on-completion**: the async handler stamps the resolved
+consumer onto each job under a `metering` block (see contract below), and the
+SQS worker (`geoworker.process_payload` → `_report_completion`) reports one usage
+event per job *only after its postback succeeds* — so an accepted-then-failed job
+never bills. Anonymous / unmetered jobs carry no `metering` block and are never
+reported.
 
 ## Event payload contract
 
@@ -60,7 +81,11 @@ One outer list, one item per job. Per-item shape:
     ]
     // Scalar jobs use "scalar_url" instead of "output":
     // "scalar_url": "https://api.example.com/api/v1/topography/postback/scalar/123/<token>/"
-  }
+  },
+  // Optional — present only for jobs entered via POST /elevation/async for a
+  // billable consumer. Stamped by http_handler; read by process_payload to
+  // report usage on a successful postback. Absent for direct-SQS / anonymous jobs.
+  "metering": {"key_hash": "<sha256 of the bypass key>", "endpoint": "elevation-async"}
 }
 ```
 

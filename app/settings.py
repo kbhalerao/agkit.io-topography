@@ -29,6 +29,11 @@ USGS_13_KEY_PREFIX = "StagedProducts/Elevation/13/TIFF/current/"
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 TEMP_FILE_PATH = os.environ.get("TEMP_FILE_PATH", "/tmp")
 
+# SQS jobs queue the HTTP async handler publishes into — the same queue the
+# SQS worker drains (aws_sqs_queue.jobs). Empty in the worker Lambda (it reads
+# via its event-source mapping, not by URL) and in tests.
+JOBS_QUEUE_URL = os.environ.get("JOBS_QUEUE_URL", "")
+
 IN_TEST = os.environ.get("IN_TEST", "false").lower() == "true"
 
 # Postback HTTP timeouts (seconds). The Django side does the heavy work

@@ -203,5 +203,101 @@ class HttpHandlerTests(unittest.TestCase):
         self.assertEqual(resp["statusCode"], 200)
 
 
+class AsyncHandlerTests(unittest.TestCase):
+    """POST /elevation/async — the metered SQS-publish proxy. Pure: the
+    renderer is irrelevant (async does no DEM work) and the SQS publish is
+    stubbed, so no GDAL and no boto3."""
+
+    JOB = {
+        "metadata": {"function_name": "elev_public_10m", "field_id": 1,
+                     "site_prefix": "agkit"},
+        "post": {"output": [{"post_url": "https://cb.example/raster/1/tok/"}]},
+    }
+
+    def setUp(self):
+        from app import http_handler, publisher
+        self.handler = http_handler.handler
+        self.publisher = publisher
+
+    @staticmethod
+    def _event(body, method="POST", path="/elevation/async", headers=None):
+        return {
+            "requestContext": {"http": {"method": method, "path": path}},
+            "headers": headers or {},
+            "body": body if isinstance(body, str) else json.dumps(body),
+            "isBase64Encoded": False,
+        }
+
+    def test_accept_publishes_and_stamps_metering(self):
+        decision = metering.Decision("serve_and_record", "elevation-async", "keyhash-1")
+        with mock.patch.object(metering, "gate", return_value=decision), \
+                mock.patch.object(self.publisher, "publish_jobs",
+                                  return_value="msg-1") as pub:
+            resp = self.handler(self._event([self.JOB]), None)
+        self.assertEqual(resp["statusCode"], 202)
+        body = json.loads(resp["body"])
+        self.assertEqual(body["jobs"], 1)
+        self.assertEqual(body["message_id"], "msg-1")
+        # The published job carries the resolved consumer for worker-side billing.
+        published = pub.call_args.args[0]
+        self.assertEqual(published[0]["metering"],
+                         {"key_hash": "keyhash-1", "endpoint": "elevation-async"})
+
+    def test_unbilled_consumer_no_metering_block(self):
+        # monitor + no credential → serve_and_record with no key: publish, but
+        # don't tag it, so the worker never bills it.
+        decision = metering.Decision("serve_and_record", "elevation-async", None)
+        with mock.patch.object(metering, "gate", return_value=decision), \
+                mock.patch.object(self.publisher, "publish_jobs",
+                                  return_value="msg-2") as pub:
+            resp = self.handler(self._event([self.JOB]), None)
+        self.assertEqual(resp["statusCode"], 202)
+        self.assertNotIn("metering", pub.call_args.args[0][0])
+
+    def test_single_dict_wrapped_into_list(self):
+        decision = metering.Decision("serve", None, None)
+        with mock.patch.object(metering, "gate", return_value=decision), \
+                mock.patch.object(self.publisher, "publish_jobs",
+                                  return_value="msg-3") as pub:
+            resp = self.handler(self._event(self.JOB), None)
+        self.assertEqual(resp["statusCode"], 202)
+        self.assertEqual(len(pub.call_args.args[0]), 1)
+
+    def test_reject_does_not_publish(self):
+        decision = metering.Decision("reject", error={
+            "status": 401, "code": "unidentified", "detail": "no cred"})
+        with mock.patch.object(metering, "gate", return_value=decision), \
+                mock.patch.object(self.publisher, "publish_jobs") as pub:
+            resp = self.handler(self._event([self.JOB]), None)
+        self.assertEqual(resp["statusCode"], 401)
+        pub.assert_not_called()
+
+    def test_bad_body_400(self):
+        with mock.patch.object(metering, "gate",
+                               return_value=metering.Decision("serve")):
+            resp = self.handler(self._event("not-json"), None)
+        self.assertEqual(resp["statusCode"], 400)
+
+    def test_empty_list_400(self):
+        with mock.patch.object(metering, "gate",
+                               return_value=metering.Decision("serve")):
+            resp = self.handler(self._event([]), None)
+        self.assertEqual(resp["statusCode"], 400)
+
+    def test_job_without_metadata_400(self):
+        with mock.patch.object(metering, "gate",
+                               return_value=metering.Decision("serve")):
+            resp = self.handler(self._event([{"post": {}}]), None)
+        self.assertEqual(resp["statusCode"], 400)
+
+    def test_enqueue_failure_502(self):
+        decision = metering.Decision("serve", None, None)
+        with mock.patch.object(metering, "gate", return_value=decision), \
+                mock.patch.object(self.publisher, "publish_jobs",
+                                  side_effect=RuntimeError("sqs down")):
+            resp = self.handler(self._event([self.JOB]), None)
+        self.assertEqual(resp["statusCode"], 502)
+
+
 if __name__ == "__main__":
     unittest.main()
