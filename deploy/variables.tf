@@ -45,6 +45,12 @@ variable "log_retention_days" {
   default     = 30
 }
 
+variable "sqs_max_receive_count" {
+  description = "Deliveries before a message is parked on the DLQ. One retry: a message carries a whole bundle (five jobs by default) at up to 900s each, and a redelivery re-runs the siblings that already succeeded."
+  type        = number
+  default     = 2
+}
+
 variable "sqs_visibility_timeout_seconds" {
   description = "Must be >= lambda_timeout_seconds. AWS recommendation: 6x the function timeout, but we cap to the max useful value."
   type        = number

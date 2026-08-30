@@ -32,11 +32,27 @@ resource "aws_ecr_lifecycle_policy" "topography" {
 # --------------------------------------------------------------------------
 # SQS — job queue. Django pushes a JSON list of jobs as a single message.
 # --------------------------------------------------------------------------
+# A message reaches this queue only because `app.handler` reported it as a
+# batch item failure. Without a redrive policy on the source queue there is
+# nowhere for a failed message to go: SQS redelivers it until the 4-day
+# retention expires and then drops it, re-running the whole bundle each time.
+resource "aws_sqs_queue" "jobs_dlq" {
+  name = "${var.name_prefix}-jobs-dlq"
+  # 14 days, the maximum. A parked message is evidence, and nobody reads a
+  # dead-letter queue the same afternoon.
+  message_retention_seconds = 1209600
+}
+
 resource "aws_sqs_queue" "jobs" {
   name                       = "${var.name_prefix}-jobs"
   visibility_timeout_seconds = var.sqs_visibility_timeout_seconds
   message_retention_seconds  = 345600 # 4 days
   receive_wait_time_seconds  = 20     # long polling
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.jobs_dlq.arn
+    maxReceiveCount     = var.sqs_max_receive_count
+  })
 }
 
 # --------------------------------------------------------------------------
