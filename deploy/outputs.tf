@@ -24,6 +24,15 @@ output "sqs_queue_arn" {
   value = aws_sqs_queue.jobs.arn
 }
 
+output "sqs_dlq_url" {
+  description = "Failed messages land here. Nothing watches it yet — an alarm on ApproximateNumberOfMessagesVisible is the follow-up."
+  value       = aws_sqs_queue.jobs_dlq.url
+}
+
+output "sqs_dlq_arn" {
+  value = aws_sqs_queue.jobs_dlq.arn
+}
+
 output "log_group_name" {
   value = aws_cloudwatch_log_group.lambda.name
 }

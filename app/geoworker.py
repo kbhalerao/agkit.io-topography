@@ -47,7 +47,12 @@ gdal.UseExceptions()
 
 def _cleanup(file_paths) -> None:
     """Best-effort `rm -rf`. Used between jobs to keep /tmp under the
-    Lambda 512MB ephemeral storage cap."""
+    Lambda 512MB ephemeral storage cap.
+
+    Skipped in IN_TEST mode so a test that calls `process_payload` does not
+    wipe the host's /tmp — the same guard `app.handler._cleanup_tmp` has."""
+    if settings.IN_TEST:
+        return
     try:
         if not isinstance(file_paths, list):
             file_paths = [file_paths]
@@ -1271,6 +1276,21 @@ class LambdaGISProcessor:
 # Entry points used by the SQS handler
 # ---------------------------------------------------------------------------
 
+class JobFailed(Exception):
+    """At least one job in this message did not land cleanly.
+
+    Raised by `process_payload` after every job has been attempted, so one
+    bad job does not deny its siblings their run. `app.handler` turns this
+    into a `batchItemFailures` entry, which is the only route a message has
+    to the DLQ.
+
+    Before this existed the two failure classes disagreed: an unknown
+    function name propagated, and a handler that threw was caught and
+    recorded as the string "ERROR" — then deleted from the queue as though
+    it had succeeded. A dropped job was indistinguishable from a done one.
+    """
+
+
 def _job_succeeded(result) -> bool:
     """Did this job's work + postback land cleanly?
 
@@ -1305,23 +1325,32 @@ def process_payload(payload: list) -> list:
     Run every job in `payload` (the parsed SQS message body — a list of
     per-job event dicts). Returns a list of human-readable result strings,
     one per job.
+
+    Raises `JobFailed` if any job did not land cleanly, after attempting all
+    of them. The caller (`app.handler`) turns that into a batch item failure
+    so SQS redelivers the message and, past `maxReceiveCount`, parks it on
+    the DLQ. Returning normally means every job in the message succeeded.
     """
     gis = LambdaGISProcessor()
     _cleanup("/tmp/*")
 
     results = []
+    failures = []
     for job in payload:
         fn_name = job["metadata"]["function_name"]
         fn = getattr(gis, fn_name, None)
         if not callable(fn):
-            raise NotImplementedError(
-                f"LambdaGISProcessor has no function named {fn_name!r}",
-            )
-        try:
-            result = fn(job)
-        except Exception as exc:
-            print(f"Job function error: {fn_name} → {exc}")
+            # Recorded rather than raised on the spot: an unconfigured
+            # function name used to abandon the rest of the bundle, which
+            # is the same job treated two ways depending on how it failed.
+            print(f"No such job function: {fn_name}")
             result = "ERROR"
+        else:
+            try:
+                result = fn(job)
+            except Exception as exc:
+                print(f"Job function error: {fn_name} → {exc}")
+                result = "ERROR"
         # x402 record-on-completion: bill an async job only once its work +
         # postback actually succeeded (see app.http_handler._handle_async for
         # where the `metering` block is stamped). Best-effort — never affects
@@ -1333,11 +1362,20 @@ def process_payload(payload: list) -> list:
             f"{site_prefix} Field ID <{field_id}> Lambda Job Function "
             f"named: {fn_name} resulted in {result}.",
         )
+        if not _job_succeeded(result):
+            failures.append(f"{fn_name} (field {field_id})")
 
     if gis.cleanup:
         _cleanup("/tmp/*.*")
 
+    # Printed before the raise: this line is the worker's health signal, and
+    # a failed message is exactly when someone wants to read it.
     print(results)
+    if failures:
+        raise JobFailed(
+            f"{len(failures)} of {len(payload)} job(s) failed: "
+            f"{', '.join(failures)}",
+        )
     return results
 
 
